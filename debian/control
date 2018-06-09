@@ -1,6 +1,6 @@
 Source: keepalived
 Section: admin
-Priority: extra
+Priority: optional
 Maintainer: Alexander Wirt <formorer@debian.org>
 Build-Depends: autoconf,
                debhelper (>= 11),
