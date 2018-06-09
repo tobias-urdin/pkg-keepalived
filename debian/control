@@ -16,7 +16,6 @@ Build-Depends: autoconf,
                libipset-dev,
                iptables-dev,
                linux-libc-dev,
-               dh-autoreconf,
                pkg-config
 Standards-Version: 4.0.0
 Vcs-Browser: https://salsa.debian.org/ipvs-team/pkg-keepalived
