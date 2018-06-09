@@ -2,7 +2,7 @@
 #
 # Keepalived OpenSource project.
 #
-# Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+# Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
 
 GIT_COMMIT_FILE		= git-commit.h
 
@@ -16,12 +16,18 @@ BUILT_SOURCES		= $(GIT_COMMIT_FILE)
 noinst_LIBRARIES	= liblib.a
 
 liblib_a_SOURCES	= memory.c utils.c notify.c timer.c scheduler.c \
-	vector.c list.c html.c parser.c signals.c logger.c rttables.c \
-	bitops.h timer.h scheduler.h rttables.h vector.h parser.h \
-	signals.h notify.h logger.h list.h memory.h html.h utils.h
+	vector.c list.c html.c parser.c signals.c logger.c assert.c \
+	bitops.h timer.h scheduler.h vector.h parser.h \
+	signals.h notify.h logger.h list.h memory.h html.h utils.h \
+	keepalived_magic.h
 
 liblib_a_LIBADD		=
 EXTRA_liblib_a_SOURCES	=
+
+if WITH_VRRP
+  liblib_a_LIBADD	+= rttables.o
+  EXTRA_liblib_a_SOURCES += rttables.c rttables.h
+endif
 
 if ! SOCK_NONBLOCK
   liblib_a_LIBADD	+= old_socket.o
@@ -32,7 +38,7 @@ EXTRA_DIST		= $(GIT_COMMIT_FILE)
 
 MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
 
-.PHONY: $(GIT_COMMIT_FILE)
+FORCE:
 
 # The git commit file will contain the git version and date of last commit,
 # unless this is a tagged version, in which case the git commit is omitted.
@@ -43,7 +49,7 @@ MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
 # The other file that needs to be ignored is deletion of snap/snapcraft.yaml,
 # since in a snapcraft build that file is deleted
 # (see https://bugs.launchpad.net/snapcraft/+bug/1662388).
-$(GIT_COMMIT_FILE):
+$(GIT_COMMIT_FILE): FORCE
 	@if [ ! -f $(srcdir)/$@ -a ! -f $@ ]; then \
 		echo '#define GIT_DATE	"unknown"' >$@; \
 		echo "#define GIT_YEAR	\"`date +%Y`\"" >>$@; \
@@ -71,7 +77,7 @@ $(GIT_COMMIT_FILE):
 			else \
 				EXTRA=""; \
 			fi; \
-			echo $${GIT_REV} | grep -qE -- "-[1-9][0-9]*-g[0-9a-f]{7}$$"; \
+			echo $${GIT_REV} | grep -qE -- "-[1-9][0-9]*-g[0-9a-f]{7,}$$"; \
 			if [ $$? -eq 0 -o -n "$${EXTRA}" ]; then \
 				echo "#define GIT_COMMIT \"$${GIT_REV}$${EXTRA}\"" >$(abs_builddir)/$@.new; \
 			fi; \

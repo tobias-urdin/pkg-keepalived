@@ -17,15 +17,18 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_DAEMON_H
 #define _VRRP_DAEMON_H
 
+#include <stdbool.h>
+
 /* Daemon define */
 #define PROG_VRRP	"Keepalived_vrrp"
-#define WDOG_VRRP	"/tmp/.vrrp"
+
+extern bool non_existent_interface_specified;
 
 /* Prototypes */
 extern int start_vrrp_child(void);

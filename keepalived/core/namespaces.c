@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2016-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2016-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 /*******************************************************************************
@@ -154,20 +154,14 @@
 
 #include "config.h"
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include <fcntl.h>
 #include <sched.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <stdio.h>
 #include <sys/mount.h>
-#include <stdlib.h>
 #include <stdbool.h>
 
 #ifndef HAVE_SETNS
@@ -180,8 +174,10 @@
 
 #include <sys/syscall.h>
 
-#include "namespaces.h"
-#include "main.h"
+/* For some reason Centos 6.5 doesn't define SYS_setns */
+#ifndef SYS_setns
+#define SYS_setns __NR_setns
+#endif
 
 #ifndef MS_SLAVE	/* Since glibc 2.12, but Linux since 2.6.15 */
 #include <linux/fs.h>
@@ -192,6 +188,7 @@ int setns(int fd, int nstype)
 }
 #endif
 
+#include "namespaces.h"
 #include "memory.h"
 #include "logger.h"
 #include "pidfile.h"
@@ -204,6 +201,7 @@ void
 free_dirname(void)
 {
 	FREE_PTR(mount_dirname);
+	mount_dirname = NULL;
 }
 
 static void
@@ -284,6 +282,7 @@ set_namespaces(const char* net_namespace)
 	set_run_mount(net_namespace);
 
 	FREE_PTR(netns_path);
+	netns_path = NULL;
 
 	return true;
 
@@ -291,6 +290,7 @@ err:
 	if (fd != -1)
 		close(fd);
 	FREE_PTR(netns_path);
+	netns_path = NULL;
 
 	return false;
 }

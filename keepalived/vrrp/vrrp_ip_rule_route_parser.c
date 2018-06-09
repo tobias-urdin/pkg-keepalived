@@ -18,6 +18,7 @@
  *              2 of the License, or (at your option) any later version.
  *
  * Copyright (C) 2015 Chris Riley, <kernelchris@gmail.com>
+ * Copyright (C) 2016-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -211,7 +212,7 @@ get_time_rtt(uint32_t *val, const char *str, bool *raw)
 	*val = (uint32_t)t;
 	if (*val < t)
 		(*val)++;
-	
+
 	return false;
 }
 

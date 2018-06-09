@@ -2,7 +2,7 @@
 #
 # Keepalived OpenSource project.
 #
-# Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+# Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
 
 AM_CPPFLAGS		= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
 AM_CFLAGS		= $(KA_CFLAGS) $(DEBUG_CFLAGS)
@@ -37,17 +37,22 @@ if WITH_DBUS
   DBUS_SUBDIR		= dbus
 endif
 
+if WITH_BFD
+  BFD_SUBDIR		= bfd
+  BFD_LIB		= bfd/libbfd.a
+endif
+
 keepalived.service: Makefile
 	@rm -f $@ $@.tmp
 	@$(edit) '$(srcdir)/$@.in' >$@
 
 keepalived.service: $(srcdir)/keepalived.service.in
 
-SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) etc
+SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) etc
 
 EXTRA_DIST		= keepalived.service.in
 
-keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) core/libcore.a ../lib/liblib.a $(KA_LIBS)
+keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcore.a ../lib/liblib.a $(KA_LIBS)
 
 MOSTLYCLEANFILES	= keepalived.service
 

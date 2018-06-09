@@ -17,17 +17,19 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
+
+#include <stdio.h>
 
 #include "list.h"
 #include "memory.h"
 
 /* Simple list helpers functions */
 list
-alloc_list(void (*free_func) (void *), void (*dump_func) (void *))
+alloc_list(void (*free_func) (void *), void (*dump_func) (FILE *fp, void *))
 {
 	return alloc_mlist(free_func, dump_func, 1);
 }
@@ -57,24 +59,30 @@ list_add(list l, void *data)
 }
 
 void
+list_remove(list l, element e)
+{
+	if (e->prev)
+		e->prev->next = e->next;
+	else
+		l->head = e->next;
+
+	if (e->next)
+		e->next->prev = e->prev;
+	else
+		l->tail = e->prev;
+
+	l->count--;
+	FREE(e);
+}
+
+void
 list_del(list l, void *data)
 {
 	element e;
 
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
 		if (ELEMENT_DATA(e) == data) {
-			if (e->prev)
-				e->prev->next = e->next;
-			else
-				l->head = e->next;
-
-			if (e->next)
-				e->next->prev = e->prev;
-			else
-				l->tail = e->prev;
-
-			l->count--;
-			FREE(e);
+			list_remove(l, e);
 			return;
 		}
 	}
@@ -100,13 +108,16 @@ list_element(list l, size_t num)
 }
 
 void
-dump_list(list l)
+dump_list(FILE *fp, list l)
 {
 	element e;
 
+	if (LIST_ISEMPTY(l))
+		return;
+
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e))
 		if (l->dump)
-			(*l->dump) (e->data);
+			(*l->dump) (fp, e->data);
 }
 
 static void
@@ -173,7 +184,7 @@ free_list_element(list l, element e)
 
 /* Multiple list helpers functions */
 list
-alloc_mlist(void (*free_func) (void *), void (*dump_func) (void *), size_t size)
+alloc_mlist(void (*free_func) (void *), void (*dump_func) (FILE *, void *), size_t size)
 {
 	list new = (list) MALLOC(size * sizeof (struct _list));
 	new->free = free_func;
@@ -183,7 +194,7 @@ alloc_mlist(void (*free_func) (void *), void (*dump_func) (void *), size_t size)
 
 #ifdef _INCLUDE_UNUSED_CODE_
 void
-dump_mlist(list l, int size)
+dump_mlist(FILE *fp, list l, size_t size)
 {
 	element e;
 	int i;
@@ -191,7 +202,7 @@ dump_mlist(list l, int size)
 	for (i = 0; i < size; i++) {
 		for (e = LIST_HEAD(&l[i]); e; ELEMENT_NEXT(e))
 			if (l->dump)
-				(*l->dump) (e->data);
+				(*l->dump) (fp, e->data);
 	}
 }
 #endif
@@ -211,9 +222,9 @@ free_melement(list l, void (*free_func) (void *))
 }
 
 void
-free_mlist(list l, int size)
+free_mlist(list l, size_t size)
 {
-	int i;
+	size_t i;
 
 	if (!l)
 		return;

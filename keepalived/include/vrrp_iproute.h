@@ -17,28 +17,32 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _VRRP_IPROUTE_H
 #define _VRRP_IPROUTE_H
 
 /* global includes */
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <arpa/inet.h>
-//#include <linux/rtnetlink.h>
+#include <sys/types.h>
 #if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
 #include <linux/mpls.h>
 #endif
-#include <stdint.h>
-#include <stdbool.h>
+#include <linux/rtnetlink.h>
 
 /* local includes */
 #include "list.h"
 #include "vector.h"
 #include "vrrp_ipaddress.h"
 #include "vrrp_if.h"
+
+/* We hope to get an official definion for this, but until then make a private one */
+#ifndef RTPROT_KEEPALIVED
+#define RTPROT_KEEPALIVED       112     /* Keepalived daemon */
+#endif
 
 /* Buffer sizes for printing */
 #define	ROUTE_BUF_SIZE		1024
@@ -145,6 +149,7 @@ enum ip_route {
 	IPROUTE_INITRWND,
 	IPROUTE_QUICKACK,
 	IPROUTE_PREF,
+	IPROUTE_FASTOPEN_NO_COOKIE,
 };
 
 #define	IPROUTE_BIT_DSFIELD	(1<<IPROUTE_DSFIELD)
@@ -168,6 +173,7 @@ enum ip_route {
 #define	IPROUTE_BIT_INITRWND	(1<<IPROUTE_INITRWND)
 #define	IPROUTE_BIT_QUICKACK	(1<<IPROUTE_QUICKACK)
 #define	IPROUTE_BIT_PREF	(1<<IPROUTE_PREF)
+#define	IPROUTE_BIT_FASTOPEN_NO_COOKIE	(1<<IPROUTE_FASTOPEN_NO_COOKIE)
 
 typedef struct _ip_route {
 	ip_address_t		*dst;
@@ -211,6 +217,9 @@ typedef struct _ip_route {
 #if HAVE_DECL_RTA_PREF
 	uint8_t			pref;
 #endif
+#if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
+	bool			fastopen_no_cookie;
+#endif
 	uint8_t			type;
 
 	uint32_t		realms;
@@ -219,7 +228,9 @@ typedef struct _ip_route {
 #endif
 	list			nhs;
 	uint32_t		mask;
+	bool			dont_track;	/* used for virtual routes */
 	bool			set;
+	uint32_t		configured_ifindex;	/* Index of interface route is configured on */
 } ip_route_t;
 
 #define IPROUTE_DEL	0
@@ -231,7 +242,7 @@ extern unsigned short add_addr2req(struct nlmsghdr *, size_t, unsigned short, ip
 extern void netlink_rtlist(list, int);
 extern void free_iproute(void *);
 extern void format_iproute(ip_route_t *, char *, size_t);
-extern void dump_iproute(void *);
+extern void dump_iproute(FILE *, void *);
 extern void alloc_route(list, vector_t *);
 extern void clear_diff_routes(list, list);
 extern void clear_diff_sroutes(void);

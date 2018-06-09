@@ -11,7 +11,7 @@ other, a private, inside-facing IP address.  In this method, the Load-Balancer
 receives requests from users on the public network and uses network address
 translation (NAT) to forward those requests to the real servers located on the
 private network.  The replies are also translated in the reverse direction,
-when the real servers reply to the users’ requests. 
+when the real servers reply to the users’ requests.
 
 As a result, an advantage is that the real servers are protected from the
 public network as they are hidden behind the Load-Balancer.  Another advantage
@@ -20,10 +20,22 @@ ranges.
 
 The main disadvantage is that the Load-Balancer becomes a bottleneck.  It has
 to service not only requests but also replies to and from the public users,
-while also forwarding to and from the private real servers. 
+while also forwarding to and from the private real servers.
 
 Virtual Server via Tunneling
 ****************************
+
+In Tunneling mode Load-Balancer sends requests to real servers through IP tunnel
+in the former, and the Load-Balancer sends request to real servers via network
+address translation in the latter.
+
+The main advantage with this metho is scalability, Load-Balancer will forward
+incoming request to farm nodes, latter nodes will then respond directly to the
+client requests without having to proxy through Load-Balancer. It offers you
+a way to locate nodes in differents networking segments.
+
+The main disadvantage is the cost you will put into it to finally get a working
+env since it is deeply dependent uppon your network architecture.
 
 Virtual Server via Direct Routing
 *********************************

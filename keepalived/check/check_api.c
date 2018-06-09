@@ -17,19 +17,19 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
-#include <dirent.h>
 #include <dlfcn.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <arpa/inet.h>
 
 #include "check_api.h"
 #include "main.h"
 #include "parser.h"
-#include "memory.h"
 #include "utils.h"
 #include "logger.h"
 #include "bitops.h"
@@ -41,6 +41,13 @@
 #include "check_http.h"
 #include "check_ssl.h"
 #include "check_dns.h"
+#include "ipwrapper.h"
+#include "check_daemon.h"
+#ifdef _WITH_BFD_
+#include "check_bfd.h"
+#include "bfd_event.h"
+#include "bfd_daemon.h"
+#endif
 
 /* Global vars */
 list checkers_queue;
@@ -49,59 +56,59 @@ list checkers_queue;
 static void
 free_checker(void *data)
 {
-	checker_t *checker= data;
+	checker_t *checker = data;
 	(*checker->free_func) (checker);
 }
 
 /* dump checker data */
 static void
-dump_checker(void *data)
+dump_checker(FILE *fp, void *data)
 {
 	checker_t *checker = data;
-	log_message(LOG_INFO, " %s", FMT_CHK(checker));
-	(*checker->dump_func) (checker);
+	conf_write(fp, " %s", FMT_CHK(checker));
+	(*checker->dump_func) (fp, checker);
 }
 
 void
-dump_connection_opts(void *data)
+dump_connection_opts(FILE *fp, void *data)
 {
 	conn_opts_t *conn = data;
 
-	log_message(LOG_INFO, "     Dest = %s", inet_sockaddrtopair(&conn->dst));
+	conf_write(fp, "     Dest = %s", inet_sockaddrtopair(&conn->dst));
 	if (conn->bindto.ss_family)
-		log_message(LOG_INFO, "     Bind to = %s", inet_sockaddrtopair(&conn->bindto));
+		conf_write(fp, "     Bind to = %s", inet_sockaddrtopair(&conn->bindto));
 	if (conn->bind_if[0])
-		log_message(LOG_INFO, "     Bind i/f = %s", conn->bind_if);
+		conf_write(fp, "     Bind i/f = %s", conn->bind_if);
 #ifdef _WITH_SO_MARK_
 	if (conn->fwmark != 0)
-		log_message(LOG_INFO, "     Mark = %u", conn->fwmark);
+		conf_write(fp, "     Mark = %u", conn->fwmark);
 #endif
-	log_message(LOG_INFO, "     Timeout = %d", conn->connection_to/TIMER_HZ);
+	conf_write(fp, "     Timeout = %d", conn->connection_to/TIMER_HZ);
 }
 
 void
-dump_checker_opts(void *data)
+dump_checker_opts(FILE *fp, void *data)
 {
 	checker_t *checker = data;
 	conn_opts_t *conn = checker->co;
 
 	if (conn) {
-		log_message(LOG_INFO, "   Connection");
-		dump_connection_opts(conn);
+		conf_write(fp, "   Connection");
+		dump_connection_opts(fp, conn);
 	}
 
-	log_message(LOG_INFO, "   Alpha is %s", checker->alpha ? "ON" : "OFF");
-	log_message(LOG_INFO, "   Delay loop = %lu" , checker->delay_loop / TIMER_HZ);
+	conf_write(fp, "   Alpha is %s", checker->alpha ? "ON" : "OFF");
+	conf_write(fp, "   Delay loop = %lu" , checker->delay_loop / TIMER_HZ);
 	if (checker->retry) {
-		log_message(LOG_INFO, "   Retry count = %u" , checker->retry);
-		log_message(LOG_INFO, "   Retry delay = %lu" , checker->delay_before_retry / TIMER_HZ);
+		conf_write(fp, "   Retry count = %u" , checker->retry);
+		conf_write(fp, "   Retry delay = %lu" , checker->delay_before_retry / TIMER_HZ);
 	}
-	log_message(LOG_INFO, "   Warmup = %lu", checker->warmup / TIMER_HZ);
+	conf_write(fp, "   Warmup = %lu", checker->warmup / TIMER_HZ);
 }
 
 /* Queue a checker into the checkers_queue */
 checker_t *
-queue_checker(void (*free_func) (void *), void (*dump_func) (void *)
+queue_checker(void (*free_func) (void *), void (*dump_func) (FILE *, void *)
 	      , int (*launch) (thread_t *)
 	      , bool (*compare) (void *, void *)
 	      , void *data
@@ -125,8 +132,7 @@ queue_checker(void (*free_func) (void *), void (*dump_func) (void *)
 	checker->rs = rs;
 	checker->data = data;
 	checker->co = co;
-	/* Enable the checker if the virtual server is not configured with ha_suspend */
-	checker->enabled = !vs->ha_suspend;
+	checker->enabled = true;
 	checker->alpha = -1;
 	checker->delay_loop = ULONG_MAX;
 	checker->warmup = ULONG_MAX;
@@ -353,11 +359,11 @@ install_checker_common_keywords(bool connection_keywords)
 
 /* dump the checkers_queue */
 void
-dump_checkers_queue(void)
+dump_checkers_queue(FILE *fp)
 {
 	if (!LIST_ISEMPTY(checkers_queue)) {
-		log_message(LOG_INFO, "------< Health checkers >------");
-		dump_list(checkers_queue);
+		conf_write(fp, "------< Health checkers >------");
+		dump_list(fp, checkers_queue);
 	}
 }
 
@@ -408,12 +414,15 @@ register_checkers_thread(void)
 	element e;
 	unsigned long warmup;
 
-	for (e = LIST_HEAD(checkers_queue); e; ELEMENT_NEXT(e)) {
-		checker = ELEMENT_DATA(e);
-		log_message(LOG_INFO, "%sctivating healthchecker for service %s for VS %s"
-				    , checker->enabled ? "A" : "Dea", FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
+	LIST_FOREACH(checkers_queue, checker, e) {
 		if (checker->launch)
 		{
+			if (checker->vs->ha_suspend && !checker->vs->ha_suspend_addr_count)
+				checker->enabled = false;
+
+			log_message(LOG_INFO, "%sctivating healthchecker for service %s for VS %s"
+					    , checker->enabled ? "A" : "Dea", FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
+
 			/* wait for a random timeout to begin checker thread.
 			   It helps avoiding multiple simultaneous checks to
 			   the same RS.
@@ -425,6 +434,14 @@ register_checkers_thread(void)
 					 BOOTSTRAP_DELAY + warmup);
 		}
 	}
+
+#ifdef _WITH_BFD_
+	log_message(LOG_INFO, "Activating BFD healthchecker");
+
+	/* We need to always enable this, since the bfd process may write to the pipe, and we
+	 * need to ensure that messages are stripped out. */
+	start_bfd_monitoring(master);
+#endif
 }
 
 /* Sync checkers activity with netlink kernel reflection */
@@ -432,7 +449,7 @@ static bool
 addr_matches(const virtual_server_t *vs, void *address)
 {
 	void *addr;
-        virtual_server_group_entry_t *vsg_entry;
+	virtual_server_group_entry_t *vsg_entry;
 
 	if (vs->addr.ss_family != AF_UNSPEC) {
 		if (vs->addr.ss_family == AF_INET6)
@@ -516,56 +533,62 @@ void
 update_checker_activity(sa_family_t family, void *address, bool enable)
 {
 	checker_t *checker;
-	element e;
+	virtual_server_t *vs;
+	element e, e1;
 	char addr_str[INET6_ADDRSTRLEN];
 	bool address_logged = false;
 
-	/* Display netlink operation */
 	if (__test_bit(LOG_ADDRESS_CHANGES, &debug)) {
 		inet_ntop(family, address, addr_str, sizeof(addr_str));
 		log_message(LOG_INFO, "Netlink reflector reports IP %s %s"
 				    , addr_str, (enable) ? "added" : "removed");
-
 		address_logged = true;
 	}
 
 	if (!using_ha_suspend)
 		return;
 
-	/* Processing Healthcheckers queue */
-	if (!LIST_ISEMPTY(checkers_queue)) {
-		for (e = LIST_HEAD(checkers_queue); e; ELEMENT_NEXT(e)) {
-			checker = ELEMENT_DATA(e);
+	if (LIST_ISEMPTY(checkers_queue))
+		return;
 
-			if (!CHECKER_HA_SUSPEND(checker))
+	/* Check if any of the virtual servers are using this address, and have ha_suspend */
+	LIST_FOREACH(check_data->vs, vs, e) {
+		if (!vs->ha_suspend)
+			continue;
+
+		/* If there is no address configured, the family will be AF_UNSPEC */
+		if (vs->af != family)
+			continue;
+
+		if (!addr_matches(vs, address))
+			continue;
+
+		if (!address_logged &&
+		    __test_bit(LOG_DETAIL_BIT, &debug)) {
+			inet_ntop(family, address, addr_str, sizeof(addr_str));
+			log_message(LOG_INFO, "Netlink reflector reports IP %s %s"
+					    , addr_str, (enable) ? "added" : "removed");
+		}
+		address_logged = true;
+
+		/* If we have that same address (IPv6 link local) on multiple interfaces,
+		 * we want to count them multiple times so that we only suspend the checkers
+		 * if they are all deleted */
+		if (enable)
+			vs->ha_suspend_addr_count++;
+		else
+			vs->ha_suspend_addr_count--;
+
+		/* Processing Healthcheckers queue for this vs */
+		LIST_FOREACH(checkers_queue, checker, e1) {
+			if (checker->vs != vs)
 				continue;
 
-			/* If there is no address configured, the family will be AF_UNSPEC */
-			if (checker->vs->af != family)
-				continue;
-
-			/* If we have that same address (IPv6 link local) on multiple interfaces,
-			 * we want to count them multiple times so that we only suspend the checkers
-			 * if they are all deleted */
-			if (addr_matches(checker->vs, address)) {
-				if (!address_logged &&
-				    __test_bit(LOG_DETAIL_BIT, &debug)) {
-					inet_ntop(family, address, addr_str, sizeof(addr_str));
-					log_message(LOG_INFO, "Netlink reflector reports IP %s %s"
-							    , addr_str, (enable) ? "added" : "removed");
-				}
-				address_logged = true;
-
-				if (enable)
-					checker->vs->ha_suspend_addr_count++;
-				else
-					checker->vs->ha_suspend_addr_count--;
-			}
-
-			if ((!(checker->vs->ha_suspend_addr_count)) == checker->enabled) {
-				log_message(LOG_INFO, "%sing healthchecker for service %s",
+			if (enable != checker->enabled &&
+			    (enable || vs->ha_suspend_addr_count == 0)) {
+				log_message(LOG_INFO, "%sing healthchecker for service %s for VS %s",
 							!checker->enabled ? "Activat" : "Suspend",
-							FMT_VS(checker->vs));
+							FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
 				checker->enabled = enable;
 			}
 		}
@@ -582,4 +605,7 @@ install_checkers_keyword(void)
 	install_http_check_keyword();
 	install_ssl_check_keyword();
 	install_dns_check_keyword();
+#ifdef _WITH_BFD_
+	install_bfd_check_keyword();
+#endif
 }

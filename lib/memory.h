@@ -18,20 +18,26 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _MEMORY_H
 #define _MEMORY_H
 
+#include "config.h"
+
 /* system includes */
+#include <stddef.h>
+#ifdef _MEM_CHECK_
+#include <sys/types.h>
+#else
 #include <stdlib.h>
-#include <stdbool.h>
+#endif
 
 /* Local defines */
 #ifdef _MEM_CHECK_
 
-#define MAX_ALLOC_LIST 2048
+#define MAX_ALLOC_LIST 2048*4*4
 
 #define MALLOC(n)    ( keepalived_malloc((n), \
 		      (__FILE__), (char *)(__FUNCTION__), (__LINE__)) )
@@ -44,6 +50,7 @@
 extern size_t mem_allocated;
 
 /* Memory debug prototypes defs */
+extern void memcheck_log(const char *, const char *, const char *, const char *, int);
 extern void *keepalived_malloc(size_t, char *, char *, int)
 		__attribute__((alloc_size(1))) __attribute__((malloc));
 extern int keepalived_free(void *, char *, char *, int);
@@ -65,5 +72,6 @@ extern void *zalloc(unsigned long size);
 #endif
 
 /* Common defines */
+#define PMALLOC(p)	{ p = MALLOC(sizeof(*p)); }
 #define FREE_PTR(p)	{ if (p) { FREE(p);} }
 #endif

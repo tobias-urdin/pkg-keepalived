@@ -1,2 +1,2 @@
-#define GIT_DATE "10/21,2017"
-#define GIT_YEAR "2017"
+#define GIT_DATE "06/06,2018"
+#define GIT_YEAR "2018"
