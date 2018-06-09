@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 /* We dynamically attempt to load the library "by hand", since keepalived
@@ -30,7 +30,7 @@
 
 #include "config.h"
 
-#include <unistd.h>
+#include <net/if.h>		/* Force inclusion of net/if.h before linux/if.h */
 #define LIBIPSET_NFPROTO_H
 #define LIBIPSET_NF_INET_ADDR_H
 #if defined LIBIPSET_H_ADD_UAPI_IP_SET_H_GUARD || defined LIBIPSET_H_ADD_IP_SET_H_GUARD
@@ -53,8 +53,7 @@
 #include "global_data.h"
 #include "vrrp_iptables.h"
 #include "vrrp_ipset.h"
-#include "vrrp_ipaddress.h"
-#include "vrrp.h"
+#include "vrrp_iptables_calls.h"
 #include "main.h"
 
 #ifdef _LIBIPSET_DYNAMIC_
@@ -153,7 +152,7 @@ bool
 has_ipset_setname(void* vsession, const char *setname)
 {
 	struct ipset_session *session = vsession;
- 
+
 	ipset_session_data_set(session, IPSET_SETNAME, setname);
 
 	return ipset_cmd1(session, IPSET_CMD_HEADER, 0) == 0;
@@ -231,9 +230,9 @@ bool ipset_init(void)
 #if HAVE_DECL_CLONE_NEWNET
 	/* Don't attempt to use ipsets if running in a namespace and the default
 	 * set names have not been overridden and the kernel version is less
-	 * than 3.13, since ipsets didn't understand namespaces prior to that. */
-	if (network_namespace &&
-	    !namespace_with_ipsets &&
+	 * than Linux 3.13, since ipsets didn't understand namespaces prior to that. */
+	if (global_data->network_namespace &&
+	    !global_data->namespace_with_ipsets &&
 	    !strcmp(global_data->vrrp_ipset_address, "keepalived") &&
 	    (os_major <= 2 ||
 	     (os_major == 3 && os_minor < 13))) {

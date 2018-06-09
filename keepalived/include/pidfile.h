@@ -17,18 +17,13 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _PIDFILE_H
 #define _PIDFILE_H
 
 /* system include */
-#include <unistd.h>
-#include <stdio.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <syslog.h>
 #include <stdbool.h>
 #include <paths.h>
 
@@ -40,8 +35,15 @@
 #endif
 #define KEEPALIVED_PID_DIR	PID_DIR PACKAGE "/"
 #define KEEPALIVED_PID_FILE	PACKAGE
+#ifdef _WITH_VRRP_
 #define VRRP_PID_FILE		"vrrp"
+#endif
+#ifdef _WITH_LVS_
 #define CHECKERS_PID_FILE	"checkers"
+#endif
+#ifdef _WITH_BFD_
+#define BFD_PID_FILE		"bfd"
+#endif
 #define	PID_EXTENSION		".pid"
 
 extern const char *pid_directory;

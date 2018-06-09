@@ -18,7 +18,7 @@
 #
 # Keepalived OpenSource project.
 #
-# Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+# Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
 
 VPATH = @srcdir@
 am__is_gnu_make = { \
@@ -203,6 +203,7 @@ EGREP = @EGREP@
 EXEEXT = @EXEEXT@
 GENHASH_LIBS = @GENHASH_LIBS@
 GREP = @GREP@
+HAVE_RPMBUILD = @HAVE_RPMBUILD@
 HAVE_SPHINX_BUILD = @HAVE_SPHINX_BUILD@
 INSTALL = @INSTALL@
 INSTALL_DATA = @INSTALL_DATA@

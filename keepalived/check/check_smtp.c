@@ -18,25 +18,26 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
+#include <errno.h>
+#include <unistd.h>
+#include <stdio.h>
 #include <ctype.h>
 
 #include "check_smtp.h"
-#include "check_api.h"
 #include "logger.h"
-#include "memory.h"
 #include "ipwrapper.h"
 #include "utils.h"
 #include "parser.h"
-#include "daemon.h"
 #if !HAVE_DECL_SOCK_CLOEXEC
 #include "old_socket.h"
-#include "string.h"
 #endif
+#include "layer4.h"
+#include "smtp.h"
 
 static conn_opts_t* default_co;	/* Default conn_opts for SMTP_CHECK */
 static conn_opts_t *sav_co;	/* Saved conn_opts while host{} block processed */
@@ -74,18 +75,18 @@ free_smtp_check(void *data)
  * configuration.
  */
 static void
-dump_smtp_check(void *data)
+dump_smtp_check(FILE *fp, void *data)
 {
 	checker_t *checker = data;
 	smtp_checker_t *smtp_checker = checker->data;
 
-	log_message(LOG_INFO, "   Keepalive method = SMTP_CHECK");
-	log_message(LOG_INFO, "   helo = %s", smtp_checker->helo_name);
-	dump_checker_opts(checker);
+	conf_write(fp, "   Keepalive method = SMTP_CHECK");
+	conf_write(fp, "   helo = %s", smtp_checker->helo_name);
+	dump_checker_opts(fp, checker);
 
 	if (smtp_checker->host) {
-		log_message(LOG_INFO,"   Host list");
-		dump_list(smtp_checker->host);
+		conf_write(fp, "   Host list");
+		dump_list(fp, smtp_checker->host);
 	}
 }
 
@@ -161,7 +162,9 @@ smtp_check_end_handler(void)
 	    co->bindto.ss_family != AF_UNSPEC ||
 	    (co->bindto.ss_family == AF_UNSPEC && ((struct sockaddr_in *)&co->bindto)->sin_port) ||
 	    co->bind_if[0] ||
+#ifdef _WITH_SO_MARK_
 	    co->fwmark ||
+#endif
 	    co->connection_to) {
 		/* Set any necessary defaults */
 		if (co->dst.ss_family == AF_UNSPEC) {
@@ -277,6 +280,8 @@ smtp_final(thread_t *thread, int error, const char *format, ...)
 	char error_buff[512];
 	char smtp_buff[542];
 	va_list varg_list;
+	bool checker_was_up;
+	bool rs_was_alive;
 
 	/* Error or no error we should always have to close the socket */
 	close(thread->u.fd);
@@ -317,19 +322,23 @@ smtp_final(thread_t *thread, int error, const char *format, ...)
 		 * be noted that smtp_alert makes a copy of the string arguments, so
 		 * we don't have to keep them statically allocated.
 		 */
-		if (checker->is_up) {
-			if (format != NULL) {
-				snprintf(error_buff, sizeof(error_buff), "=> CHECK failed on service : %s <=", format);
-				va_start(varg_list, format);
-				vsnprintf(smtp_buff, sizeof(smtp_buff), error_buff, varg_list);
-				va_end(varg_list);
-			} else {
-				strncpy(smtp_buff, "=> CHECK failed on service <=", sizeof(smtp_buff));
-			}
-
-			smtp_buff[sizeof(smtp_buff) - 1] = '\0';
-			smtp_alert(checker, NULL, NULL, "DOWN", smtp_buff);
+		if (checker->is_up || !checker->has_run) {
+			checker_was_up = checker->is_up;
+			rs_was_alive = checker->rs->alive;
 			update_svr_checker_state(DOWN, checker);
+			if (checker->rs->smtp_alert && checker_was_up &&
+			    (rs_was_alive != checker->rs->alive || !global_data->no_checker_emails)) {
+				if (format != NULL) {
+					snprintf(error_buff, sizeof(error_buff), "=> CHECK failed on service : %s <=", format);
+					va_start(varg_list, format);
+					vsnprintf(smtp_buff, sizeof(smtp_buff), error_buff, varg_list);
+					va_end(varg_list);
+				} else
+					strncpy(smtp_buff, "=> CHECK failed on service <=", sizeof(smtp_buff));
+
+				smtp_buff[sizeof(smtp_buff) - 1] = '\0';
+				smtp_alert(SMTP_MSG_RS, checker, NULL, smtp_buff);
+			}
 		}
 
 		/* Reset everything back to the first host in the list */
@@ -379,7 +388,6 @@ smtp_get_line_cb(thread_t *thread)
 	checker_t *checker = THREAD_ARG(thread);
 	smtp_checker_t *smtp_checker = CHECKER_ARG(checker);
 	conn_opts_t *smtp_host = smtp_checker->host_ptr;
-	int f;
 	unsigned x;
 	ssize_t r;
 
@@ -398,10 +406,6 @@ smtp_get_line_cb(thread_t *thread)
 		smtp_clear_buff(thread);
 	}
 
-	/* Set descriptor non blocking */
-	f = fcntl(thread->u.fd, F_GETFL, 0);
-	fcntl(thread->u.fd, F_SETFL, f | O_NONBLOCK);
-
 	/* read the data */
 	r = read(thread->u.fd, smtp_checker->buff + smtp_checker->buff_ctr,
 		 SMTP_BUFF_MAX - smtp_checker->buff_ctr);
@@ -409,13 +413,9 @@ smtp_get_line_cb(thread_t *thread)
 	if (r == -1 && (errno == EAGAIN || errno == EINTR)) {
 		thread_add_read(thread->master, smtp_get_line_cb, checker,
 				thread->u.fd, smtp_host->connection_to);
-		fcntl(thread->u.fd, F_SETFL, f);
 		return 0;
 	} else if (r > 0)
 		smtp_checker->buff_ctr += (size_t)r;
-
-	/* restore descriptor flags */
-	fcntl(thread->u.fd, F_SETFL, f);
 
 	/* check if we have a newline, if so, callback */
 	for (x = 0; x < SMTP_BUFF_MAX; x++) {
@@ -492,7 +492,6 @@ smtp_put_line_cb(thread_t *thread)
 	checker_t *checker = THREAD_ARG(thread);
 	smtp_checker_t *smtp_checker = CHECKER_ARG(checker);
 	conn_opts_t *smtp_host = smtp_checker->host_ptr;
-	int f;
 	ssize_t w;
 
 
@@ -503,22 +502,14 @@ smtp_put_line_cb(thread_t *thread)
 		return 0;
 	}
 
-	/* Set descriptor non blocking */
-	f = fcntl(thread->u.fd, F_GETFL, 0);
-	fcntl(thread->u.fd, F_SETFL, f | O_NONBLOCK);
-
 	/* write the data */
 	w = write(thread->u.fd, smtp_checker->buff, smtp_checker->buff_ctr);
 
 	if (w == -1 && (errno == EAGAIN || errno == EINTR)) {
 		thread_add_write(thread->master, smtp_put_line_cb, checker,
 				 thread->u.fd, smtp_host->connection_to);
-		fcntl(thread->u.fd, F_SETFL, f);
 		return 0;
 	}
-
-	/* restore descriptor flags */
-	fcntl(thread->u.fd, F_SETFL, f);
 
 	DBG("SMTP_CHECK %s > %s"
 	    , FMT_SMTP_RS(smtp_host)
@@ -737,6 +728,8 @@ smtp_connect_thread(thread_t *thread)
 	conn_opts_t *smtp_host;
 	enum connect_result status;
 	int sd;
+	bool checker_was_up;
+	bool rs_was_alive;
 
 	/* Let's review our data structures.
 	 *
@@ -782,13 +775,17 @@ smtp_connect_thread(thread_t *thread)
 	 * will be reset and we will continue on checking them one by one.
 	 */
 	if ((smtp_checker->host_ptr = list_element(smtp_checker->host, smtp_checker->host_ctr)) == NULL) {
-		if (!checker->is_up) {
+		if (!checker->is_up || !checker->has_run) {
 			log_message(LOG_INFO, "Remote SMTP server %s succeed on service."
 					    , FMT_CHK(checker));
 
-			smtp_alert(checker, NULL, NULL, "UP",
-				   "=> CHECK succeed on service <=");
+			checker_was_up = checker->is_up;
+			rs_was_alive = checker->rs->alive;
 			update_svr_checker_state(UP, checker);
+			if (checker->rs->smtp_alert && !checker_was_up &&
+			    (rs_was_alive != checker->rs->alive || !global_data->no_checker_emails))
+				smtp_alert(SMTP_MSG_RS, checker, NULL,
+					   "=> CHECK succeed on service <=");
 		}
 
 		checker->retry_it = 0;
@@ -801,13 +798,19 @@ smtp_connect_thread(thread_t *thread)
 
 	smtp_host = smtp_checker->host_ptr;
 
-	/* Create the socket, failling here should be an oddity */
-	if ((sd = socket(smtp_host->dst.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP)) == -1) {
+	/* Create the socket, failing here should be an oddity */
+	if ((sd = socket(smtp_host->dst.ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP)) == -1) {
 		log_message(LOG_INFO, "SMTP_CHECK connection failed to create socket. Rescheduling.");
 		thread_add_timer(thread->master, smtp_connect_thread, checker,
 				 checker->delay_loop);
 		return 0;
 	}
+
+#if !HAVE_DECL_SOCK_NONBLOCK
+	if (set_sock_flags(sd, F_SETFL, O_NONBLOCK))
+		log_message(LOG_INFO, "Unable to set NONBLOCK on smtp socket - %s (%d)", strerror(errno), errno);
+#endif
+
 #if !HAVE_DECL_SOCK_CLOEXEC
 	if (set_sock_flags(sd, F_SETFD, FD_CLOEXEC))
 		log_message(LOG_INFO, "Unable to set CLOEXEC on smtp socket - %s (%d)", strerror(errno), errno);
@@ -825,3 +828,15 @@ smtp_connect_thread(thread_t *thread)
 
 	return 0;
 }
+
+#ifdef _TIMER_DEBUG_
+void
+print_check_smtp_addresses(void)
+{
+	log_message(LOG_INFO, "Address of dump_smtp_check() is 0x%p", dump_smtp_check);
+	log_message(LOG_INFO, "Address of smtp_check_thread() is 0x%p", smtp_check_thread);
+	log_message(LOG_INFO, "Address of smtp_connect_thread() is 0x%p", smtp_connect_thread);
+	log_message(LOG_INFO, "Address of smtp_get_line_cb() is 0x%p", smtp_get_line_cb);
+	log_message(LOG_INFO, "Address of smtp_put_line_cb() is 0x%p", smtp_put_line_cb);
+}
+#endif

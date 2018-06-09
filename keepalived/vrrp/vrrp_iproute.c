@@ -17,16 +17,14 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
 /* local include */
-#include "vrrp_ipaddress.h"
 #include "vrrp_iproute.h"
 #include "keepalived_netlink.h"
-#include "vrrp_if.h"
 #include "vrrp_data.h"
 #include "logger.h"
 #include "memory.h"
@@ -35,7 +33,7 @@
 #include "vrrp_ip_rule_route_parser.h"
 
 #include <linux/icmpv6.h>
-#include <linux/rtnetlink.h>
+#include <inttypes.h>
 #if HAVE_DECL_RTA_ENCAP
 #include <linux/lwtunnel.h>
 #if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
@@ -45,7 +43,9 @@
 #include <linux/ila.h>
 #endif
 #endif
-#include <inttypes.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <linux/rtnetlink.h>
 
 /* Buffer sizes for netlink messages. Increase if needed. */
 #define	RTM_SIZE		1024
@@ -335,13 +335,14 @@ netlink_route(ip_route_t *iproute, int cmd)
 			req.r.rtm_type = iproute->type;
 	}
 	else {
-		req.r.rtm_protocol = RTPROT_BOOT;
 		req.r.rtm_scope = RT_SCOPE_UNIVERSE;
 		req.r.rtm_type = iproute->type;
 	}
 
 	if (iproute->mask & IPROUTE_BIT_PROTOCOL)
 		req.r.rtm_protocol = iproute->protocol;
+	else
+		req.r.rtm_protocol = RTPROT_KEEPALIVED;
 
 	if (iproute->mask & IPROUTE_BIT_SCOPE)
 		req.r.rtm_scope = iproute->scope;
@@ -389,7 +390,7 @@ netlink_route(ip_route_t *iproute, int cmd)
 
 	if (iproute->mask & IPROUTE_BIT_DSFIELD)
 		req.r.rtm_tos = iproute->tos;
-	
+
 	if (iproute->oif)
 		addattr32(&req.n, sizeof(req), RTA_OIF, iproute->oif->ifindex);
 
@@ -460,6 +461,11 @@ netlink_route(ip_route_t *iproute, int cmd)
 		addattr8(&req.n, sizeof(req), RTA_PREF, iproute->pref);
 #endif
 
+#if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
+	if (iproute->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE)
+		rta_addattr32(rta, sizeof(buf), RTAX_FASTOPEN_NO_COOKIE, iproute->fastopen_no_cookie);
+#endif
+
 	if (rta->rta_len > RTA_LENGTH(0)) {
 		if (iproute->lock)
 			rta_addattr32(rta, sizeof(buf), RTAX_LOCK, iproute->lock);
@@ -480,7 +486,7 @@ netlink_route(ip_route_t *iproute, int cmd)
 	op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), "nlmsghdr %p(%u):", &req.n, req.n.nlmsg_len);
 	for (i = 0, p = (uint8_t*)&req.n; i < sizeof(struct nlmsghdr); i++)
 		op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), " %2.2hhx", *(p++));
-	log_message(LOG_INFO, "%s\n", lbuf);
+	log_message(LOG_INFO, "%s", lbuf);
 
 	op = lbuf;
 	op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), "rtmsg %p(%lu):", &req.r, req.n.nlmsg_len - sizeof(struct nlmsghdr));
@@ -488,7 +494,7 @@ netlink_route(ip_route_t *iproute, int cmd)
 		op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), " %2.2hhx", *(p++));
 
 	for (j = 0; lbuf + j < op; j+= MAX_LOG_MSG)
-		log_message(LOG_INFO, "%.*\n", MAX_LOG_MSG, lbuf+j);
+		log_message(LOG_INFO, "%.*", MAX_LOG_MSG, lbuf+j);
 #endif
 
 	/* This returns ESRCH if the address of via address doesn't exist */
@@ -675,6 +681,7 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 	char *op = buf;
 	const char *buf_end = buf + buf_len;
 	nexthop_t *nh;
+	interface_t *ifp;
 	element e;
 
 	if (route->type != RTN_UNICAST)
@@ -836,6 +843,11 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 			"unknown");
 #endif
 
+#if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
+	if (route->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE)
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %u", "fastopen_no_cookie", route->fastopen_no_cookie);
+#endif
+
 	if (!LIST_ISEMPTY(route->nhs)) {
 		for (e = LIST_HEAD(route->nhs); e; ELEMENT_NEXT(e)) {
 			nh = ELEMENT_DATA(e);
@@ -868,10 +880,21 @@ format_iproute(ip_route_t *route, char *buf, size_t buf_len)
 #endif
 		}
 	}
+	if (route->dont_track)
+		op += (size_t)snprintf(op, (size_t)(buf_end - op), " no-track");
+
+	if (route->set &&
+	    !route->dont_track &&
+	    (!route->oif || route->oif->ifindex != route->configured_ifindex)) {
+		if ((ifp = if_get_by_ifindex(route->configured_ifindex)))
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [dev %s]", ifp->ifname);
+		else
+			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [installed ifindex %d]", route->configured_ifindex);
+	}
 }
 
 void
-dump_iproute(void *rt_data)
+dump_iproute(FILE *fp, void *rt_data)
 {
 	ip_route_t *route = rt_data;
 	char *buf = MALLOC(ROUTE_BUF_SIZE);
@@ -880,8 +903,12 @@ dump_iproute(void *rt_data)
 
 	format_iproute(route, buf, ROUTE_BUF_SIZE);
 
-	for (i = 0, len = strlen(buf); i < len; i += i ? MAX_LOG_MSG - 7 : MAX_LOG_MSG - 5)
-		log_message(LOG_INFO, "%*s%s", i ? 7 : 5, "", buf + i);
+	if (fp)
+		conf_write(fp, "%*s%s", 4, "", buf);
+	else {
+		for (i = 0, len = strlen(buf); i < len; i += i ? MAX_LOG_MSG - 7 : MAX_LOG_MSG - 5)
+			conf_write(fp, "%*s%s", i ? 6 : 4, "", buf + i);
+	}
 
 	FREE(buf);
 }
@@ -980,8 +1007,15 @@ static int parse_encap_ip(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 err:
 	*i_ptr = i;
 
-	FREE_PTR(encap->ip.dst);
-	FREE_PTR(encap->ip.src);
+	if (encap->ip.dst) {
+		FREE_PTR(encap->ip.dst);
+		encap->ip.dst = NULL;
+	}
+	if (encap->ip.src){
+		FREE_PTR(encap->ip.src);
+		encap->ip.src = NULL;
+	}
+
 	return true;
 }
 
@@ -1079,8 +1113,15 @@ int parse_encap_ip6(vector_t *strvec, unsigned int *i_ptr, encap_t *encap)
 
 err:
 	*i_ptr = i;
-	FREE_PTR(encap->ip6.dst);
-	FREE_PTR(encap->ip6.src);
+	if (encap->ip6.dst) {
+		FREE_PTR(encap->ip6.dst);
+		encap->ip6.dst = NULL;
+	}
+	if (encap->ip6.src) {
+		FREE_PTR(encap->ip6.src);
+		encap->ip6.src = NULL;
+	}
+
 	return true;
 }
 
@@ -1169,11 +1210,10 @@ parse_nexthops(vector_t *strvec, unsigned int i, ip_route_t *route)
 					route->family = new->addr->ifa.ifa_family;
 			}
 			else if (!strcmp(str, "dev")) {
-				new->ifp = if_get_by_ifname(strvec_slot(strvec, ++i));
+				str = strvec_slot(strvec, ++i);
+				new->ifp = if_get_by_ifname(str, IF_CREATE_IF_DYNAMIC);
 				if (!new->ifp) {
-					log_message(LOG_INFO, "VRRP is trying to assign VROUTE to unknown "
-					       "%s interface !!! go out and fix your conf !!!",
-					       FMT_STR_VSLOT(strvec, i));
+					log_message(LOG_INFO, "WARNING - interface %s for VROUTE nexthop doesn't exist", str);
 					goto err;
 				}
 			}
@@ -1195,7 +1235,7 @@ parse_nexthops(vector_t *strvec, unsigned int i, ip_route_t *route)
 #if HAVE_DECL_RTA_ENCAP
 				parse_encap(strvec, &i, &new->encap);
 #else
-				log_message(LOG_INFO, "encap not supported by kernel - please remove configuration");
+				log_message(LOG_INFO, "%s not supported by kernel", "encap");
 #endif
 			}
 			else if (!strcmp(str, "realms")) {
@@ -1250,6 +1290,7 @@ alloc_route(list rt_list, vector_t *strvec)
 	bool raw;
 	ip_address_t *dst;
 	uint8_t family;
+	char *dest = NULL;
 
 	new = (ip_route_t *) MALLOC(sizeof(ip_route_t));
 
@@ -1284,7 +1325,7 @@ alloc_route(list rt_list, vector_t *strvec)
 #if HAVE_DECL_RTA_NEWDST
 			log_message(LOG_INFO, "\"as to\" for MPLS only - ignoring");
 #else
-			log_message(LOG_INFO, "'as [to]' not supported by kernel");
+			log_message(LOG_INFO, "%s not supported by kernel", "'as [to]'");
 #endif
 		}
 		else if (!strcmp(str, "via") || !strcmp(str, "gw")) {
@@ -1387,11 +1428,10 @@ alloc_route(list rt_list, vector_t *strvec)
 			new->mask |= IPROUTE_BIT_METRIC;
 		}
 		else if (!strcmp(str, "dev") || !strcmp(str, "oif")) {
-			ifp = if_get_by_ifname(strvec_slot(strvec, ++i));
+			str = strvec_slot(strvec, ++i);
+			ifp = if_get_by_ifname(str, IF_CREATE_IF_DYNAMIC);
 			if (!ifp) {
-				log_message(LOG_INFO, "VRRP is trying to assign VROUTE to unknown "
-				       "%s interface !!! go out and fix your conf !!!",
-				       FMT_STR_VSLOT(strvec, i));
+				log_message(LOG_INFO, "WARNING - interface %s for VROUTE nexthop doesn't exist", str);
 				goto err;
 			}
 			new->oif = ifp;
@@ -1404,7 +1444,7 @@ alloc_route(list rt_list, vector_t *strvec)
 #if HAVE_DECL_RTA_ENCAP
 			parse_encap(strvec, &i, &new->encap);
 #else
-			log_message(LOG_INFO, "encap not supported by kernel - please remove configuration");
+			log_message(LOG_INFO, "%s not supported by kernel", "encap");
 #endif
 		}
 		else if (!strcmp(str, "expires")) {	// New in 4.4
@@ -1419,7 +1459,7 @@ alloc_route(list rt_list, vector_t *strvec)
 				goto err;
 			new->mask |= IPROUTE_BIT_EXPIRES;
 #else
-			log_message(LOG_INFO, "expires not supported by kernel");
+			log_message(LOG_INFO, "%s not supported by kernel", "expires");
 #endif
 		}
 		else if (!strcmp(str, "mtu")) {
@@ -1554,7 +1594,7 @@ alloc_route(list rt_list, vector_t *strvec)
 			new->quickack = val;
 			new->mask |= IPROUTE_BIT_QUICKACK;
 #else
-			log_message(LOG_INFO, "quickack for route not supported by kernel");
+			log_message(LOG_INFO, "%s not supported by kernel", "quickack for route");
 #endif
 		}
 		else if (!strcmp(str, "congctl")) {
@@ -1566,9 +1606,9 @@ alloc_route(list rt_list, vector_t *strvec)
 			}
 			str = strvec_slot(strvec, i);
 			new->congctl = malloc(strlen(str) + 1);
-			strcpy(new->congctl, str); 
+			strcpy(new->congctl, str);
 #else
-			log_message(LOG_INFO, "congctl for route not supported by kernel");
+			log_message(LOG_INFO, "%s not supported by kernel", "congctl for route");
 #endif
 		}
 		else if (!strcmp(str, "pref")) {
@@ -1592,7 +1632,19 @@ alloc_route(list rt_list, vector_t *strvec)
 				goto err;
 			new->mask |= IPROUTE_BIT_PREF;
 #else
-			log_message(LOG_INFO, "pref not supported by kernel");
+			log_message(LOG_INFO, "%s not supported by kernel", "pref");
+#endif
+		}
+		else if (!strcmp(str, "fastopen_no_cookie")) {
+			i++;
+#if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
+			uint32_t val;
+			if (get_u32(&val, strvec_slot(strvec, i), 1, "Invalid fastopen_no_cookie value %s specified for route"))
+				goto err;
+			new->fastopen_no_cookie = !!val;
+			new->mask |= IPROUTE_BIT_FASTOPEN_NO_COOKIE;
+#else
+			log_message(LOG_INFO, "%s not supported by kernel", "fastopen_no_cookie");
 #endif
 		}
 		/* Maintained for backward compatibility */
@@ -1630,6 +1682,8 @@ alloc_route(list rt_list, vector_t *strvec)
 				do_nexthop = true;
 			break;
 		}
+		else if (!strcmp(str, "no-track"))
+			new->dont_track = true;
 		else {
 			if (!strcmp(str, "to"))
 				i++;
@@ -1641,15 +1695,16 @@ alloc_route(list rt_list, vector_t *strvec)
 			}
 			if (new->dst)
 				FREE(new->dst);
-			dst = parse_ipaddress(NULL, strvec_slot(strvec, i), true);
+			dest = strvec_slot(strvec, i);
+			dst = parse_ipaddress(NULL, dest, true);
 			if (!dst) {
-				log_message(LOG_INFO, "unknown route keyword %s", FMT_STR_VSLOT(strvec, i));
+				log_message(LOG_INFO, "unknown route keyword %s", dest);
 				goto err;
 			}
 			if (new->family == AF_UNSPEC)
 				new->family = dst->ifa.ifa_family;
 			else if (new->family != dst->ifa.ifa_family) {
-				log_message(LOG_INFO, "Cannot mix IPv4 and IPv6 addresses for route");
+				log_message(LOG_INFO, "Cannot mix IPv4 and IPv6 addresses for route (%s)", dest);
 				goto err;
 			}
 			new->dst = dst;
@@ -1664,6 +1719,28 @@ alloc_route(list rt_list, vector_t *strvec)
 		goto err;
 	}
 
+	if (!new->dst) {
+		log_message(LOG_INFO, "Route must have a destination");
+		goto err;
+	}
+
+	if (!new->dont_track) {
+		if ((new->mask & IPROUTE_BIT_PROTOCOL) && new->protocol != RTPROT_KEEPALIVED)
+			log_message(LOG_INFO, "Route cannot be tracked if protocol is not RTPROT_KEEPALIVED(%d), resetting protocol", RTPROT_KEEPALIVED);
+		new->protocol = RTPROT_KEEPALIVED;
+		new->mask |= IPROUTE_BIT_PROTOCOL;
+
+		if (!new->oif) {
+			/* Alternative is to track oif from when route last added.
+			 * The interface will need to be added temporarily. tracking_vrrp_t will need
+			 * a flag to specify permanent track, and a counter for number of temporary
+			 * trackers. If the termporary tracker count becomes 0 and there is no permanent
+			 * track, then the tracking_vrrp_t will need to be removed. */
+			log_message(LOG_INFO, "Warning - cannot track route %s with no interface specified, not tracking", dest);
+			new->dont_track = true;
+		}
+	}
+
 	list_add(rt_list, new);
 
 	return;
@@ -1673,7 +1750,7 @@ err:
 }
 
 /* Try to find a route in a list */
-static int
+static bool
 route_exist(list l, ip_route_t *iproute)
 {
 	ip_route_t *ipr;
@@ -1690,10 +1767,10 @@ route_exist(list l, ip_route_t *iproute)
 		     ipr->metric == iproute->metric) &&
 		    ipr->table == iproute->table) {
 			ipr->set = iproute->set;
-			return 1;
+			return true;
 		}
 	}
-	return 0;
+	return false;
 }
 
 /* Clear diff routes */

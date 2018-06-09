@@ -18,16 +18,15 @@
  *               as published by the Free Software Foundation; either version
  *               2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE /* to make O_CLOEXEC available */
-#endif
-
+#include <errno.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -36,10 +35,11 @@
 #endif
 
 #include "ipvswrapper.h"
+#include "global_data.h"
 #include "list.h"
 #include "utils.h"
-#include "memory.h"
 #include "logger.h"
+#include "libipvs.h"
 
 static bool no_ipvs = false;
 
@@ -99,6 +99,9 @@ modprobe_ipvs(void)
 	act.sa_flags = 0;
 
 	sigaction ( SIGCHLD, &act, &old_act);
+
+	if (log_file_name)
+		flush_log_file();
 
 	if (!(child = fork())) {
 		execv(argv[0], argv);
@@ -254,7 +257,7 @@ ipvs_syncd_cmd(int cmd, const struct lvs_syncd_config *config, int state, bool i
 	if (config) {
 		daemonrule.syncid = (int)config->syncid;
 		if (!ignore_interface)
-			strncpy(daemonrule.mcast_ifn, config->ifname, IP_VS_IFNAME_MAXLEN);
+			strcpy(daemonrule.mcast_ifn, config->ifname);
 #ifdef _HAVE_IPVS_SYNCD_ATTRIBUTES_
 		if (cmd == IPVS_STARTDAEMON) {
 			if (config->sync_maxlen)
@@ -657,8 +660,8 @@ vsd_equal(real_server_t *rs, struct ip_vs_dest_entry_app *entry)
 					     : (void *)&((struct sockaddr_in6 *)&rs->addr)->sin6_addr))
 		return false;
 
-	if (entry->user.port != (entry->af == AF_INET) ? ((struct sockaddr_in *)&rs->addr)->sin_port
-						       : ((struct sockaddr_in6 *)&rs->addr)->sin6_port)
+	if (entry->user.port != (entry->af == AF_INET ? ((struct sockaddr_in *)&rs->addr)->sin_port
+						      : ((struct sockaddr_in6 *)&rs->addr)->sin6_port))
 		return false;
 
 	return true;
@@ -707,6 +710,8 @@ ipvs_update_vs_stats(virtual_server_t *vs, uint32_t fwmark, union nf_inet_addr *
 				if (vsd_equal(rs, &dests->user.entrytable[i]))
 					break;
 			}
+			if (!e)
+				rs = NULL;
 		}
 
 		if (rs) {

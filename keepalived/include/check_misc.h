@@ -18,35 +18,32 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _CHECK_MISC_H
 #define _CHECK_MISC_H
 
 /* system includes */
-#include <stdlib.h>
 #include <stdbool.h>
 #include <sys/types.h>
 
-/* local includes */
-#include "scheduler.h"
+/* user includes */
+#include "notify.h"
+#include "keepalived_magic.h"
 
 /* Checker argument structure  */
 typedef struct _misc_checker {
-	char			*path;
+	notify_script_t		script;		/* The script details */
 	unsigned long		timeout;
 	bool			dynamic;	/* false: old-style, true: exit code from checker affects weight */
-	bool			forcing_termination; /* Set if we have sent the process a SIGTERM */
-	uid_t			uid;		/* uid for script execution */
-	gid_t			gid;		/* gid for script execution */
-	bool			insecure;	/* script is insecure */
+	script_state_t		state;		/* current state of script */
 	timeval_t		last_ran;	/* Time script last ran */
 } misc_checker_t;
 
 /* Prototypes defs */
 extern void clear_dynamic_misc_check_flag(void);
 extern void install_misc_check_keyword(void);
-extern int check_misc_script_security(void);
+extern int check_misc_script_security(magic_t);
 
 #endif

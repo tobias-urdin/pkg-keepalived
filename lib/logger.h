@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@linux-vs.org>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _LOGGER_H
@@ -25,13 +25,22 @@
 
 #include <stdarg.h>
 #include <syslog.h>
+#include <stdio.h>
 
 #define	MAX_LOG_MSG	255
 
-void enable_console_log(void);
-void vlog_message(const int facility, const char* format, va_list args)
+extern char *log_file_name;
+
+extern void enable_console_log(void);
+extern void set_flush_log_file(void);
+extern void close_log_file(void);
+extern void open_log_file(const char *, const char *, const char *, const char *);
+extern void flush_log_file(void);
+extern void vlog_message(const int facility, const char* format, va_list args)
 	__attribute__ ((format (printf, 2, 0)));
-void log_message(int priority, const char* format, ...)
+extern void log_message(int priority, const char* format, ...)
+	__attribute__ ((format (printf, 2, 3)));
+extern void conf_write(FILE *fp, const char *format, ...)
 	__attribute__ ((format (printf, 2, 3)));
 
 #endif

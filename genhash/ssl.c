@@ -5,8 +5,6 @@
  *
  * Part:        SSL engine. 'Semi' asyncrhonous stream handling.
  *
- * Version:     $Id: ssl.c,v 1.1.16 2009/02/14 03:25:07 acassen Exp $
- *
  * Authors:     Alexandre Cassen, <acassen@linux-vs.org>
  *
  *              This program is distributed in the hope that it will be useful,
@@ -19,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -29,13 +27,10 @@
 
 /* keepalived includes */
 #include "utils.h"
-#include "html.h"
 
 /* genhash includes */
-#include "include/main.h"
-#include "include/sock.h"
-#include "include/http.h"
 #include "include/ssl.h"
+#include "include/main.h"
 
 /* extern variables */
 extern REQ *req;
@@ -44,20 +39,23 @@ extern REQ *req;
  * Initialize the SSL context, with or without specific
  * configuration files.
  */
-static BIO *bio_err = 0;
 void
 init_ssl(void)
 {
 	/* Library initialization */
+#if HAVE_OPENSSL_INIT_CRYPTO
+	if (!OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL))
+		fprintf(stderr, "OPENSSL_init_crypto failed\n");
+#else
 	SSL_library_init();
-
 	SSL_load_error_strings();
-	bio_err = BIO_new_fp(stderr, BIO_NOCLOSE);
+#endif
+
 	/* Initialize SSL context for SSL v2/3 */
-	req->meth = (SSL_METHOD *) SSLv23_method();
+	req->meth = SSLv23_method();
 	req->ctx = SSL_CTX_new(req->meth);
 
-#if (OPENSSL_VERSION_NUMBER < 0x00905100L)
+#if HAVE_SSL_CTX_SET_VERIFY_DEPTH
 	SSL_CTX_set_verify_depth(req->ctx, 1);
 #endif
 }
@@ -66,9 +64,6 @@ init_ssl(void)
 int
 ssl_printerr(int err)
 {
-	unsigned long extended_error = 0;
-	char *ssl_strerr;
-
 	switch (err) {
 	case SSL_ERROR_ZERO_RETURN:
 		fprintf(stderr, "  SSL error: (zero return)\n");
@@ -88,15 +83,9 @@ ssl_printerr(int err)
 	case SSL_ERROR_SYSCALL:
 		fprintf(stderr, "  SSL error: (syscall error)\n");
 		break;
-	case SSL_ERROR_SSL:{
-			ssl_strerr = (char *) MALLOC(500);
-
-			extended_error = ERR_get_error();
-			ERR_error_string(extended_error, ssl_strerr);
-			fprintf(stderr, "  SSL error: (%s)\n", ssl_strerr);
-			FREE(ssl_strerr);
-			break;
-		}
+	case SSL_ERROR_SSL:
+		fprintf(stderr, "  SSL error: (%s)\n", ERR_error_string(ERR_get_error(), NULL));
+		break;
 	}
 	return 0;
 }
@@ -110,7 +99,19 @@ ssl_connect(thread_t * thread)
 	sock_obj->ssl = SSL_new(req->ctx);
 	sock_obj->bio = BIO_new_socket(sock_obj->fd, BIO_NOCLOSE);
 	BIO_set_nbio(sock_obj->bio, 1);	/* Set the Non-Blocking flag */
+#if HAVE_SSL_SET0_RBIO
+	BIO_up_ref(sock_obj->bio);
+	SSL_set0_rbio(sock_obj->ssl, sock_obj->bio);
+	SSL_set0_wbio(sock_obj->ssl, sock_obj->bio);
+#else
 	SSL_set_bio(sock_obj->ssl, sock_obj->bio, sock_obj->bio);
+#endif
+#ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
+		if (req->vhost != NULL && req->sni) {
+			SSL_set_tlsext_host_name(sock_obj->ssl, req->vhost);
+		}
+#endif
+
 	ret = SSL_connect(sock_obj->ssl);
 
 	DBG("  SSL_connect return code = %d on fd:%d\n", ret, thread->u.fd);
@@ -148,8 +149,10 @@ ssl_read_thread(thread_t * thread)
 	int error;
 
 	/* Handle read timeout */
-	if (thread->type == THREAD_READ_TIMEOUT)
+	if (thread->type == THREAD_READ_TIMEOUT) {
+		exit_code = 1;
 		return epilog(thread);
+	}
 
 	/*
 	 * The design implemented here is a workaround for use

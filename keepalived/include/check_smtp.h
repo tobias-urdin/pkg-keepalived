@@ -18,17 +18,16 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #ifndef _CHECK_SMTP_H
 #define _CHECK_SMTP_H
 
 /* system includes */
-#include <stdlib.h>
+#include <sys/types.h>
 
 /* local includes */
-#include "check_data.h"
 #include "scheduler.h"
 #include "list.h"
 #include "check_api.h"
