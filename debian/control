@@ -19,8 +19,8 @@ Build-Depends: autoconf,
                dh-autoreconf,
                pkg-config
 Standards-Version: 4.0.0
-Vcs-Browser: https://github.com/formorer/pkg-keepalived
-Vcs-Git: git://github.com/formorer/pkg-keepalived.git
+Vcs-Browser: https://salsa.debian.org/ipvs-team/pkg-keepalived
+Vcs-Git: https://salsa.debian.org/ipvs-team/pkg-keepalived.git
 Homepage: http://keepalived.org
 
 Package: keepalived
