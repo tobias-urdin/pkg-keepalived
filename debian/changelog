@@ -1,3 +1,24 @@
+keepalived (1:2.0.10-1) unstable; urgency=high
+
+  * [3b99bf9] Update vcs headers to salsa
+  * [f697779] New upstream version 2.0.2
+  * [c97cc19] Enable dbus instance and json output support
+  * [27c6d55] syslog is now socket activated
+  * [7e2267b] Move to dh11
+  * [d0bf9db] there is not systemd sequence in dh11
+  * [903a5a0] dh-autoreconf dep is not needed anymore with dh11
+  * [c4996bd] Priority extra got replaced by optional
+  * [822da17] Remove obsolete patches
+  * [1c36cdc] New upstream version 2.0.10
+    - Fix overflow in extract_status_code (CVE-2018-19115)
+      Closes: #914393, #900260
+    - Improve garp refresh handling (Closes: #810347)
+    - Improve config parser (Closes: #909697)
+  * [990c014] Improve keepalived service (Closes: #902978, #830196)
+
+
+ -- Alexander Wirt <formorer@debian.org>  Fri, 30 Nov 2018 21:20:05 +0100
+
 keepalived (1:1.3.9-1) unstable; urgency=medium
 
   * [e95b710] New upstream version 1.3.9
