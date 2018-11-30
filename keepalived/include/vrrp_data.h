@@ -33,13 +33,14 @@
 
 /* Configuration data root */
 typedef struct _vrrp_data {
+	list			static_track_groups;
 	list			static_addresses;
+#if _HAVE_FIB_ROUTING_
 	list			static_routes;
 	list			static_rules;
+#endif
 	list			vrrp_sync_group;
 	list			vrrp;			/* vrrp_t */
-	list			vrrp_index;
-	list			vrrp_index_fd;
 	list			vrrp_socket_pool;
 	list			vrrp_script;		/* vrrp_script_t */
 	list			vrrp_track_files;	/* vrrp_tracked_file_t */
@@ -55,6 +56,7 @@ extern char *vrrp_buffer;
 extern size_t vrrp_buffer_len;
 
 /* prototypes */
+extern void alloc_static_track_group(char *);
 extern void alloc_saddress(vector_t *);
 extern void alloc_sroute(vector_t *);
 extern void alloc_srule(vector_t *);
