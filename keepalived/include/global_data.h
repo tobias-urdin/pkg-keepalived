@@ -61,6 +61,12 @@
 /* constants */
 #define DEFAULT_SMTP_CONNECTION_TIMEOUT (30 * TIMER_HZ)
 
+#ifdef _WITH_VRRP_
+#define RX_BUFS_POLICY_MTU		0x01
+#define RX_BUFS_POLICY_ADVERT		0x02
+#define RX_BUFS_SIZE			0x04
+#endif
+
 /* email link list */
 typedef struct _email {
 	char				*addr;
@@ -72,6 +78,7 @@ typedef struct _data {
 	char				*network_namespace;	/* network namespace name */
 	bool				namespace_with_ipsets;	/* override for namespaces with ipsets on Linux < 3.13 */
 #endif
+	char				*local_name;
 	char				*instance_name;		/* keepalived instance name */
 	bool				linkbeat_use_polling;
 	char				*router_id;
@@ -83,8 +90,10 @@ typedef struct _data {
 	int				smtp_alert;
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
+	bool				allow_if_changes;
 	bool				no_email_faults;
 	int				smtp_alert_vrrp;
+	char				*default_ifname;	/* Name of default interface */
 	interface_t			*default_ifp;		/* Default interface for static addresses */
 #endif
 #ifdef _WITH_LVS_
@@ -199,6 +208,12 @@ typedef struct _data {
 	bool				rs_init_notifies;
 	bool				no_checker_emails;
 #endif
+#ifdef _WITH_VRRP_
+	int				vrrp_rx_bufs_policy;
+	size_t				vrrp_rx_bufs_size;
+	int				vrrp_rx_bufs_multiples;
+#endif
+	mode_t				umask;			/* mask for file creation */
 } data_t;
 
 /* Global vars exported */
@@ -208,7 +223,7 @@ extern data_t *old_global_data;	/* Old global configuration data - used during r
 /* Prototypes */
 extern void alloc_email(char *);
 extern data_t *alloc_global_data(void);
-extern void init_global_data(data_t *);
+extern void init_global_data(data_t *, data_t *);
 extern void free_global_data(data_t *);
 extern void dump_global_data(FILE *, data_t *);
 
