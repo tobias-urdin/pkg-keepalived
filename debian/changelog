@@ -1,3 +1,19 @@
+keepalived (1:2.0.19-1) UNRELEASED; urgency=medium
+
+  * [3e69686] New upstream version 2.0.19 (Closes: #947472)
+    - fixes execution of scripts with /bin/sh (Closes: #931617)
+    - fixes configuration parsing for SMTP sections (Closes: #859142)
+    - fixes stuck in receive queue (Closes: #942182)
+    - close netlink in checker (Closes: #775868)
+    - fix infinite loop when tracker script times out (Closes: #940036)
+    - fix loading of libipset (Closes: #878241)
+  * [6a81734] Move to debhelper(-compat) 12
+  * [02d9f5d] Bump standards version
+  * [239c70f] Fix location of the ip_vs header file
+  * [ee338dc] Update changelog
+
+ -- Alexander Wirt <formorer@debian.org>  Sun, 05 Jan 2020 18:24:01 +0100
+
 keepalived (1:2.0.10-1) unstable; urgency=medium
 
   * [3b99bf9] Update vcs headers to salsa
