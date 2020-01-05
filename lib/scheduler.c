@@ -32,10 +32,6 @@
 #undef FREE
 #endif
 
-#ifndef _DEBUG_
-#define NDEBUG
-#endif
-#include <assert.h>
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/timerfd.h>
@@ -59,12 +55,15 @@
 #if !HAVE_EPOLL_CREATE1 || !defined TFD_NONBLOCK
 #include "old_socket.h"
 #endif
+#include "assert_debug.h"
+#include "warnings.h"
+#include "utils.h"
 
 
 #ifdef THREAD_DUMP
 typedef struct _func_det {
 	const char *name;
-	int (*func)(thread_t *);
+	thread_func_t func;
 	rb_node_t n;
 } func_det_t;
 #endif
@@ -81,7 +80,7 @@ bool snmp_running;		/* True if this process is running SNMP */
 /* local variables */
 static bool shutting_down;
 static int sav_argc;
-static char **sav_argv;
+static char * const *sav_argv;
 #ifdef _EPOLL_DEBUG_
 bool do_epoll_debug;
 #endif
@@ -138,7 +137,7 @@ function_cmp(const func_det_t *func1, const func_det_t *func2)
 }
 
 static const char *
-get_function_name(int (*func)(thread_t *))
+get_function_name(thread_func_t func)
 {
 	func_det_t func_det = { .func = func };
 	func_det_t *match;
@@ -165,7 +164,7 @@ get_signal_function_name(void (*func)(void *, int))
 }
 
 void
-register_thread_address(const char *func_name, int (*func)(thread_t *))
+register_thread_address(const char *func_name, thread_func_t func)
 {
 	func_det_t *func_det;
 
@@ -214,6 +213,8 @@ static int
 thread_move_ready(thread_master_t *m, rb_root_cached_t *root, thread_t *thread, int type)
 {
 	rb_erase_cached(&thread->n, root);
+	if (type == THREAD_CHILD_TIMEOUT)
+		rb_erase(&thread->rb_data, &master->child_pid);
 	INIT_LIST_HEAD(&thread->next);
 	list_add_tail(&thread->next, &m->ready);
 	if (thread->type != THREAD_TIMER_SHUTDOWN)
@@ -243,14 +244,12 @@ thread_rb_move_ready(thread_master_t *m, rb_root_cached_t *root, int type)
 static void
 thread_update_timer(rb_root_cached_t *root, timeval_t *timer_min)
 {
-	thread_t *first;
+	const thread_t *first;
 
 	if (!root->rb_root.rb_node)
 		return;
 
 	first = rb_entry(rb_first_cached(root), thread_t, n);
-	if (!first)
-		return;
 
 	if (first->sands.tv_sec == TIMER_DISABLED)
 		return;
@@ -308,12 +307,12 @@ thread_set_timer(thread_master_t *m)
 
 #ifdef _EPOLL_DEBUG_
 	if (do_epoll_debug)
-		log_message(LOG_INFO, "Setting timer_fd %lu.%9.9ld", its.it_value.tv_sec, its.it_value.tv_nsec);
+		log_message(LOG_INFO, "Setting timer_fd %ld.%9.9ld", its.it_value.tv_sec, its.it_value.tv_nsec);
 #endif
 }
 
 static int
-thread_timerfd_handler(thread_t *thread)
+thread_timerfd_handler(thread_ref_t thread)
 {
 	thread_master_t *m = thread->master;
 	uint64_t expired;
@@ -330,14 +329,14 @@ thread_timerfd_handler(thread_t *thread)
 	thread_rb_move_ready(m, &m->child, THREAD_CHILD_TIMEOUT);
 
 	/* Register next timerfd thread */
-	m->timer_thread = thread_add_read(m, thread_timerfd_handler, NULL, m->timer_fd, TIMER_NEVER);
+	m->timer_thread = thread_add_read(m, thread_timerfd_handler, NULL, m->timer_fd, TIMER_NEVER, false);
 
 	return 0;
 }
 
 /* Child PID cmp helper */
 static inline int
-thread_child_pid_cmp(thread_t *t1, thread_t *t2)
+thread_child_pid_cmp(const thread_t *t1, const thread_t *t2)
 {
 	return t1->u.c.pid - t2->u.c.pid;
 }
@@ -349,7 +348,7 @@ set_child_finder_name(char const * (*func)(pid_t))
 }
 
 void
-save_cmd_line_options(int argc, char **argv)
+save_cmd_line_options(int argc, char * const *argv)
 {
 	sav_argc = argc;
 	sav_argv = argv;
@@ -391,7 +390,7 @@ log_options(const char *option, const char *option_str, unsigned indent)
 
 		end = get_end(p, 100 - opt_len);
 		if (first_line) {
-			log_message(LOG_INFO, "%*s%s: %.*s", indent, "", option, (int)(end - p), p);
+			log_message(LOG_INFO, "%*s%s: %.*s", (int)indent, "", option, (int)(end - p), p);
 			first_line = false;
 		}
 		else
@@ -416,8 +415,11 @@ log_command_line(unsigned indent)
 
 	log_str = MALLOC(len);
 
-	for (i = 0, p = log_str; i < sav_argc; i++)
+RELAX_STRICT_OVERFLOW_START
+	for (i = 0, p = log_str; i < sav_argc; i++) {
+RELAX_STRICT_OVERFLOW_END
 		p += sprintf(p, "%s'%s'", i ? " " : "", sav_argv[i]);
+	}
 
 	log_options("Command line", log_str, indent);
 
@@ -438,7 +440,7 @@ report_child_status(int status, pid_t pid, char const *prog_name)
 		prog_id = child_finder_name(pid);
 
 	if (!prog_id) {
-		snprintf(pid_buf, sizeof(pid_buf), "pid %d", pid);
+		snprintf(pid_buf, sizeof(pid_buf), "pid %hd", pid);
 		prog_id = pid_buf;
 	}
 
@@ -551,7 +553,7 @@ thread_event_new(thread_master_t *m, int fd)
 	return event;
 }
 
-static thread_event_t *
+static thread_event_t * __attribute__ ((pure))
 thread_event_get(thread_master_t *m, int fd)
 {
 	thread_event_t event = { .fd = fd };
@@ -560,14 +562,13 @@ thread_event_get(thread_master_t *m, int fd)
 }
 
 static int
-thread_event_set(thread_t *thread)
+thread_event_set(const thread_t *thread)
 {
 	thread_event_t *event = thread->event;
 	thread_master_t *m = thread->master;
-	struct epoll_event ev;
+	struct epoll_event ev = { .events = 0 };
 	int op;
 
-	memset(&ev, 0, sizeof(struct epoll_event));
 	ev.data.ptr = event;
 	if (__test_bit(THREAD_FL_READ_BIT, &event->flags))
 		ev.events |= EPOLLIN;
@@ -590,8 +591,9 @@ thread_event_set(thread_t *thread)
 }
 
 static int
-thread_event_cancel(thread_t *thread)
+thread_event_cancel(const thread_t *thread_cp)
 {
+	thread_t *thread = no_const(thread_t, thread_cp);
 	thread_event_t *event = thread->event;
 	thread_master_t *m = thread->master;
 
@@ -600,12 +602,15 @@ thread_event_cancel(thread_t *thread)
 		return -1;
 	}
 
+	/* Ignore error if it was an SNMP fd, since we don't know
+	 * if they have been closed */
 	if (m->epoll_fd != -1 &&
 	    epoll_ctl(m->epoll_fd, EPOLL_CTL_DEL, event->fd, NULL) < 0 &&
-	    errno != EBADF) {
+#ifdef _WITH_SNMP_
+	    !FD_ISSET(event->fd, &m->snmp_fdset) &&
+#endif
+	    errno != EBADF)
 		log_message(LOG_INFO, "scheduler: Error performing epoll_ctl DEL op for fd:%d (%m)", event->fd);
-		return -1;
-	}
 
 	rb_erase(&event->n, &m->io_events);
 	if (event == m->current_event)
@@ -615,8 +620,9 @@ thread_event_cancel(thread_t *thread)
 }
 
 static int
-thread_event_del(thread_t *thread, unsigned flag)
+thread_event_del(const thread_t *thread_cp, unsigned flag)
 {
+	thread_t *thread = no_const(thread_t, thread_cp);
 	thread_event_t *event = thread->event;
 
 	if (!__test_bit(flag, &event->flags))
@@ -706,7 +712,7 @@ thread_make_master(void)
 
 	new->signal_fd = signal_handler_init();
 
-	new->timer_thread = thread_add_read(new, thread_timerfd_handler, NULL, new->timer_fd, TIMER_NEVER);
+	new->timer_thread = thread_add_read(new, thread_timerfd_handler, NULL, new->timer_fd, TIMER_NEVER, false);
 
 	add_signal_read_thread(new);
 
@@ -714,10 +720,10 @@ thread_make_master(void)
 }
 
 #ifdef THREAD_DUMP
-static char *
+static const char *
 timer_delay(timeval_t sands)
 {
-	static char str[42];
+	static char str[43];
 
 	if (sands.tv_sec == TIMER_DISABLED)
 		return "NEVER";
@@ -726,10 +732,10 @@ timer_delay(timeval_t sands)
 
 	if (timercmp(&sands, &time_now, >=)) {
 		sands = timer_sub_now(sands);
-		snprintf(str, sizeof str, "%lu.%6.6ld", sands.tv_sec, sands.tv_usec);
+		snprintf(str, sizeof str, "%ld.%6.6ld", sands.tv_sec, sands.tv_usec);
 	} else {
 		timersub(&time_now, &sands, &sands);
-		snprintf(str, sizeof str, "-%lu.%6.6ld", sands.tv_sec, sands.tv_usec);
+		snprintf(str, sizeof str, "-%ld.%6.6ld", sands.tv_sec, sands.tv_usec);
 	}
 
 	return str;
@@ -737,7 +743,7 @@ timer_delay(timeval_t sands)
 
 /* Dump rbtree */
 static void
-thread_rb_dump(rb_root_cached_t *root, const char *tree, FILE *fp)
+thread_rb_dump(const rb_root_cached_t *root, const char *tree, FILE *fp)
 {
 	thread_t *thread;
 	int i = 1;
@@ -745,28 +751,28 @@ thread_rb_dump(rb_root_cached_t *root, const char *tree, FILE *fp)
 	conf_write(fp, "----[ Begin rb_dump %s ]----", tree);
 
 	rb_for_each_entry_cached(thread, root, n)
-		conf_write(fp, "#%.2d Thread type %s, event_fd %d, val/fd/pid %d, timer: %s, func %s(), id %ld", i++, get_thread_type_str(thread->type), thread->event ? thread->event->fd: -2, thread->u.val, timer_delay(thread->sands), get_function_name(thread->func), thread->id);
+		conf_write(fp, "#%.2d Thread type %s, event_fd %d, val/fd/pid %d, fd_close %d, timer: %s, func %s(), id %lu", i++, get_thread_type_str(thread->type), thread->event ? thread->event->fd: -2, thread->u.val, thread->u.f.close_on_reload, timer_delay(thread->sands), get_function_name(thread->func), thread->id);
 
 	conf_write(fp, "----[ End rb_dump ]----");
 }
 
 static void
-thread_list_dump(list_head_t *l, const char *list, FILE *fp)
+thread_list_dump(const list_head_t *l, const char *list_type, FILE *fp)
 {
 	thread_t *thread;
 	int i = 1;
 
-	conf_write(fp, "----[ Begin list_dump %s ]----", list);
+	conf_write(fp, "----[ Begin list_dump %s ]----", list_type);
 
 	list_for_each_entry(thread, l, next)
-		conf_write(fp, "#%.2d Thread:%p type %s func %s() id %ld",
+		conf_write(fp, "#%.2d Thread:%p type %s func %s() id %lu",
 				i++, thread, get_thread_type_str(thread->type), get_function_name(thread->func), thread->id);
 
 	conf_write(fp, "----[ End list_dump ]----");
 }
 
 static void
-event_rb_dump(rb_root_t *root, const char *tree, FILE *fp)
+event_rb_dump(const rb_root_t *root, const char *tree, FILE *fp)
 {
 	thread_event_t *event;
 	int i = 1;
@@ -778,7 +784,7 @@ event_rb_dump(rb_root_t *root, const char *tree, FILE *fp)
 }
 
 void
-dump_thread_data(thread_master_t *m, FILE *fp)
+dump_thread_data(const thread_master_t *m, FILE *fp)
 {
 	thread_rb_dump(&m->read, "read", fp);
 	thread_rb_dump(&m->write, "write", fp);
@@ -820,6 +826,7 @@ static void
 thread_add_unuse(thread_master_t *m, thread_t *thread)
 {
 	assert(m != NULL);
+
 	thread->type = THREAD_UNUSED;
 	thread->event = NULL;
 	INIT_LIST_HEAD(&thread->next);
@@ -850,11 +857,23 @@ thread_destroy_rb(thread_master_t *m, rb_root_cached_t *root)
 	rb_for_each_entry_safe_cached(thread, thread_tmp, root, n) {
 		rb_erase_cached(&thread->n, root);
 
-		/* Do we have a thread_event, and does it need deleting? */
-		if (thread->type == THREAD_READ)
-			thread_del_read(thread);
-		else if (thread->type == THREAD_WRITE)
-			thread_del_write(thread);
+		if (thread->type == THREAD_READ ||
+		    thread->type == THREAD_WRITE ||
+		    thread->type == THREAD_READY_FD ||
+		    thread->type == THREAD_READ_TIMEOUT ||
+		    thread->type == THREAD_WRITE_TIMEOUT ||
+		    thread->type == THREAD_READ_ERROR ||
+		    thread->type == THREAD_WRITE_ERROR) {
+			/* Do we have a thread_event, and does it need deleting? */
+			if (thread->type == THREAD_READ)
+				thread_del_read(thread);
+			else if (thread->type == THREAD_WRITE)
+				thread_del_write(thread);
+
+			/* Do we have a file descriptor that needs closing ? */
+			if (thread->u.f.close_on_reload)
+				thread_close_fd(thread);
+		}
 
 		thread_add_unuse(m, thread);
 	}
@@ -865,6 +884,7 @@ void
 thread_cleanup_master(thread_master_t * m)
 {
 	/* Unuse current thread lists */
+	m->current_event = NULL;
 	thread_destroy_rb(m, &m->read);
 	thread_destroy_rb(m, &m->write);
 	thread_destroy_rb(m, &m->timer);
@@ -952,8 +972,8 @@ thread_new(thread_master_t *m)
 }
 
 /* Add new read thread. */
-thread_t *
-thread_add_read_sands(thread_master_t *m, int (*func) (thread_t *), void *arg, int fd, timeval_t *sands)
+thread_ref_t
+thread_add_read_sands(thread_master_t *m, thread_func_t func, void *arg, int fd, const timeval_t *sands, bool close_on_reload)
 {
 	thread_event_t *event;
 	thread_t *thread;
@@ -982,7 +1002,8 @@ thread_add_read_sands(thread_master_t *m, int (*func) (thread_t *), void *arg, i
 	thread->master = m;
 	thread->func = func;
 	thread->arg = arg;
-	thread->u.fd = fd;
+	thread->u.f.fd = fd;
+	thread->u.f.close_on_reload = close_on_reload;
 	thread->event = event;
 
 	/* Set & flag event */
@@ -1005,24 +1026,25 @@ thread_add_read_sands(thread_master_t *m, int (*func) (thread_t *), void *arg, i
 	return thread;
 }
 
-thread_t *
-thread_add_read(thread_master_t *m, int (*func) (thread_t *), void *arg, int fd, unsigned long timer)
+thread_ref_t
+thread_add_read(thread_master_t *m, thread_func_t func, void *arg, int fd, unsigned long timer, bool close_on_reload)
 {
 	timeval_t sands;
 
 	/* Compute read timeout value */
-	if (timer == TIMER_NEVER)
+	if (timer == TIMER_NEVER) {
 		sands.tv_sec = TIMER_DISABLED;
-	else {
+		sands.tv_usec = 0;
+	} else {
 		set_time_now();
 		sands = timer_add_long(time_now, timer);
 	}
 
-	return thread_add_read_sands(m, func, arg, fd, &sands);
+	return thread_add_read_sands(m, func, arg, fd, &sands, close_on_reload);
 }
 
 int
-thread_del_read(thread_t *thread)
+thread_del_read(thread_ref_t thread)
 {
 	if (!thread || !thread->event)
 		return -1;
@@ -1037,7 +1059,7 @@ thread_del_read(thread_t *thread)
 static void
 thread_del_read_fd(thread_master_t *m, int fd)
 {
-	thread_event_t *event;
+	const thread_event_t *event;
 
 	event = thread_event_get(m, fd);
 	if (!event || !event->read)
@@ -1076,8 +1098,8 @@ thread_requeue_read(thread_master_t *m, int fd, const timeval_t *sands)
 }
 
 /* Add new write thread. */
-thread_t *
-thread_add_write(thread_master_t *m, int (*func) (thread_t *), void *arg, int fd, unsigned long timer)
+thread_ref_t
+thread_add_write(thread_master_t *m, thread_func_t func, void *arg, int fd, unsigned long timer, bool close_on_reload)
 {
 	thread_event_t *event;
 	thread_t *thread;
@@ -1106,7 +1128,8 @@ thread_add_write(thread_master_t *m, int (*func) (thread_t *), void *arg, int fd
 	thread->master = m;
 	thread->func = func;
 	thread->arg = arg;
-	thread->u.fd = fd;
+	thread->u.f.fd = fd;
+	thread->u.f.close_on_reload = close_on_reload;
 	thread->event = event;
 
 	/* Set & flag event */
@@ -1136,7 +1159,7 @@ thread_add_write(thread_master_t *m, int (*func) (thread_t *), void *arg, int fd
 }
 
 int
-thread_del_write(thread_t *thread)
+thread_del_write(thread_ref_t thread)
 {
 	if (!thread || !thread->event)
 		return -1;
@@ -1148,21 +1171,23 @@ thread_del_write(thread_t *thread)
 }
 
 void
-thread_close_fd(thread_t *thread)
+thread_close_fd(thread_ref_t thread_cp)
 {
-	if (thread->u.fd == -1)
+	thread_t *thread = no_const(thread_t, thread_cp);
+
+	if (thread->u.f.fd == -1)
 		return;
 
 	if (thread->event)
 		thread_event_cancel(thread);
 
-	close(thread->u.fd);
-	thread->u.fd = -1;
+	close(thread->u.f.fd);
+	thread->u.f.fd = -1;
 }
 
 /* Add timer event thread. */
-thread_t *
-thread_add_timer(thread_master_t *m, int (*func) (thread_t *), void *arg, unsigned long timer)
+thread_ref_t
+thread_add_timer(thread_master_t *m, thread_func_t func, void *arg, unsigned long timer)
 {
 	thread_t *thread;
 
@@ -1173,6 +1198,7 @@ thread_add_timer(thread_master_t *m, int (*func) (thread_t *), void *arg, unsign
 	thread->master = m;
 	thread->func = func;
 	thread->arg = arg;
+	thread->u.val = 0;
 
 	/* Do we need jitter here? */
 	if (timer == TIMER_NEVER)
@@ -1189,8 +1215,9 @@ thread_add_timer(thread_master_t *m, int (*func) (thread_t *), void *arg, unsign
 }
 
 void
-timer_thread_update_timeout(thread_t *thread, unsigned long timer)
+timer_thread_update_timeout(thread_ref_t thread_cp, unsigned long timer)
 {
+	thread_t *thread = no_const(thread_t, thread_cp);
 	timeval_t sands;
 
 	if (thread->type > THREAD_MAX_WAITING) {
@@ -1209,19 +1236,24 @@ timer_thread_update_timeout(thread_t *thread, unsigned long timer)
 	rb_move_cached(&thread->master->timer, thread, n, thread_timer_cmp);
 }
 
-thread_t *
-thread_add_timer_shutdown(thread_master_t *m, int(*func)(thread_t *), void *arg, unsigned long timer)
+thread_ref_t
+thread_add_timer_shutdown(thread_master_t *m, thread_func_t func, void *arg, unsigned long timer)
 {
-	thread_t *thread = thread_add_timer(m, func, arg, timer);
+	union {
+		thread_t *p;
+		const thread_t *cp;
+	} thread;
+       
+	thread.cp = thread_add_timer(m, func, arg, timer);
 
-	thread->type = THREAD_TIMER_SHUTDOWN;
+	thread.p->type = THREAD_TIMER_SHUTDOWN;
 
-	return thread;
+	return thread.cp;
 }
 
 /* Add a child thread. */
-thread_t *
-thread_add_child(thread_master_t * m, int (*func) (thread_t *), void * arg, pid_t pid, unsigned long timer)
+thread_ref_t
+thread_add_child(thread_master_t * m, thread_func_t func, void * arg, pid_t pid, unsigned long timer)
 {
 	thread_t *thread;
 
@@ -1253,7 +1285,7 @@ thread_add_child(thread_master_t * m, int (*func) (thread_t *), void * arg, pid_
 }
 
 void
-thread_children_reschedule(thread_master_t *m, int (*func)(thread_t *), unsigned long timer)
+thread_children_reschedule(thread_master_t *m, thread_func_t func, unsigned long timer)
 {
 	thread_t *thread;
 
@@ -1266,8 +1298,8 @@ thread_children_reschedule(thread_master_t *m, int (*func)(thread_t *), unsigned
 }
 
 /* Add simple event thread. */
-thread_t *
-thread_add_event(thread_master_t * m, int (*func) (thread_t *), void *arg, int val)
+thread_ref_t
+thread_add_event(thread_master_t * m, thread_func_t func, void *arg, int val)
 {
 	thread_t *thread;
 
@@ -1286,8 +1318,8 @@ thread_add_event(thread_master_t * m, int (*func) (thread_t *), void *arg, int v
 }
 
 /* Add terminate event thread. */
-static thread_t *
-thread_add_generic_terminate_event(thread_master_t * m, thread_type_t type, int (*func)(thread_t *))
+static thread_ref_t
+thread_add_generic_terminate_event(thread_master_t * m, thread_type_t type, thread_func_t func)
 {
 	thread_t *thread;
 
@@ -1305,22 +1337,22 @@ thread_add_generic_terminate_event(thread_master_t * m, thread_type_t type, int 
 	return thread;
 }
 
-thread_t *
+thread_ref_t
 thread_add_terminate_event(thread_master_t *m)
 {
 	return thread_add_generic_terminate_event(m, THREAD_TERMINATE, NULL);
 }
 
-thread_t *
-thread_add_start_terminate_event(thread_master_t *m, int(*func)(thread_t *))
+thread_ref_t
+thread_add_start_terminate_event(thread_master_t *m, thread_func_t func)
 {
 	return thread_add_generic_terminate_event(m, THREAD_TERMINATE_START, func);
 }
 
 #ifdef USE_SIGNAL_THREADS
 /* Add signal thread. */
-thread_t *
-thread_add_signal(thread_master_t *m, int (*func) (thread_t *), void *arg, int signum)
+thread_ref_t
+thread_add_signal(thread_master_t *m, thread_func_t func, void *arg, int signum)
 {
 	thread_t *thread;
 
@@ -1347,8 +1379,9 @@ thread_add_signal(thread_master_t *m, int (*func) (thread_t *), void *arg, int s
 
 /* Cancel thread from scheduler. */
 void
-thread_cancel(thread_t *thread)
+thread_cancel(thread_ref_t thread_cp)
 {
+	thread_t *thread = no_const(thread_t, thread_cp);
 	thread_master_t *m;
 
 	if (!thread || thread->type == THREAD_UNUSED)
@@ -1406,7 +1439,7 @@ thread_cancel_read(thread_master_t *m, int fd)
 	thread_t *thread, *thread_tmp;
 
 	rb_for_each_entry_safe_cached(thread, thread_tmp, &m->read, n) {
-		if (thread->u.fd == fd) {
+		if (thread->u.f.fd == fd) {
 			if (thread->event->write) {
 				thread_cancel(thread->event->write);
 				thread->event->write = NULL;
@@ -1437,23 +1470,23 @@ thread_cancel_event(thread_master_t *m, void *arg)
 
 #ifdef _WITH_SNMP_
 static int
-snmp_read_thread(thread_t *thread)
+snmp_read_thread(thread_ref_t thread)
 {
 	fd_set snmp_fdset;
 
 	FD_ZERO(&snmp_fdset);
-	FD_SET(thread->u.fd, &snmp_fdset);
+	FD_SET(thread->u.f.fd, &snmp_fdset);
 
 	snmp_read(&snmp_fdset);
 	netsnmp_check_outstanding_agent_requests();
 
-	thread_add_read(thread->master, snmp_read_thread, thread->arg, thread->u.fd, TIMER_NEVER);
+	thread_add_read(thread->master, snmp_read_thread, thread->arg, thread->u.f.fd, TIMER_NEVER, false);
 
 	return 0;
 }
 
 int
-snmp_timeout_thread(thread_t *thread)
+snmp_timeout_thread(thread_ref_t thread)
 {
 	snmp_timeout();
 	run_alarms();
@@ -1471,6 +1504,7 @@ snmp_epoll_info(thread_master_t *m)
 	fd_set snmp_fdset;
 	int fdsetsize = 0;
 	int max_fdsetsize;
+	int set_words;
 	struct timeval snmp_timer_wait = { .tv_sec = TIMER_DISABLED };
 	int snmpblock = true;
 	unsigned long *old_set, *new_set;	// Must be unsigned for ffsl() to work for us
@@ -1501,8 +1535,9 @@ snmp_epoll_info(thread_master_t *m)
 	max_fdsetsize = m->snmp_fdsetsize > fdsetsize ? m->snmp_fdsetsize : fdsetsize;
 	if (!max_fdsetsize)
 		return;
+	set_words = (max_fdsetsize - 1) / (sizeof(*old_set) * CHAR_BIT) + 1;
 
-	for (i = 0, old_set = (unsigned long *)&m->snmp_fdset, new_set = (unsigned long *)&snmp_fdset; i <= max_fdsetsize / (int)sizeof(*new_set); i++, old_set++, new_set++) {
+	for (i = 0, old_set = (unsigned long *)&m->snmp_fdset, new_set = (unsigned long *)&snmp_fdset; i < set_words; i++, old_set++, new_set++) {
 		if (*old_set == *new_set)
 			continue;
 
@@ -1514,7 +1549,7 @@ snmp_epoll_info(thread_master_t *m)
 			fd += bit;
 			if (FD_ISSET(fd, &snmp_fdset)) {
 				/* Add the fd */
-				thread_add_read(m, snmp_read_thread, 0, fd, TIMER_NEVER);
+				thread_add_read(m, snmp_read_thread, 0, fd, TIMER_NEVER, false);
 				FD_SET(fd, &m->snmp_fdset);
 			} else {
 				/* Remove the fd */
@@ -1525,13 +1560,72 @@ snmp_epoll_info(thread_master_t *m)
 	}
 	m->snmp_fdsetsize = fdsetsize;
 }
+
+/* If a file descriptor was registered with epoll, but it has been closed, the registration
+ * will have been lost, even though the new fd value is the same. We therefore need to
+ * unregister all the fds we had registered, and reregister them. */
+void
+snmp_epoll_reset(thread_master_t *m)
+{
+	fd_set snmp_fdset;
+	int fdsetsize = 0;
+	int set_words;
+	int max_fdsetsize;
+	struct timeval snmp_timer_wait = { .tv_sec = TIMER_DISABLED };
+	int snmpblock = true;
+	unsigned long *old_set, *new_set;	// Must be unsigned for ffsl() to work for us
+	unsigned long bits;
+	int i;
+	int fd;
+	int bit;
+
+	FD_ZERO(&snmp_fdset);
+
+	snmp_select_info(&fdsetsize, &snmp_fdset, &snmp_timer_wait, &snmpblock);
+
+	max_fdsetsize = m->snmp_fdsetsize > fdsetsize ? m->snmp_fdsetsize : fdsetsize;
+	if (!max_fdsetsize)
+		return;
+
+	set_words = (max_fdsetsize - 1) / (sizeof(*old_set) * CHAR_BIT) + 1;
+
+	/* Clear all the fds that were registered with epoll */
+	for (i = 0, old_set = (unsigned long *)&m->snmp_fdset; i < set_words; i++, old_set++) {
+		bits = *old_set;
+		fd = i * sizeof(*old_set) * CHAR_BIT - 1;
+		do {
+			bit = ffsl(bits);
+			bits >>= bit;
+			fd += bit;
+
+			/* Remove the fd */
+			thread_del_read_fd(m, fd);
+			FD_CLR(fd, &m->snmp_fdset);
+		} while (bits);
+	}
+
+	/* Add the file descriptors that are now in use */
+	for (i = 0, new_set = (unsigned long *)&snmp_fdset; i < set_words; i++, new_set++) {
+		bits = *new_set;
+		fd = i * sizeof(*new_set) * CHAR_BIT - 1;
+		do {
+			bit = ffsl(bits);
+			bits >>= bit;
+			fd += bit;
+
+			/* Add the fd */
+			thread_add_read(m, snmp_read_thread, 0, fd, TIMER_NEVER, false);
+			FD_SET(fd, &m->snmp_fdset);
+		} while (bits);
+	}
+	m->snmp_fdsetsize = fdsetsize;
+}
 #endif
 
 /* Fetch next ready thread. */
 static list_head_t *
 thread_fetch_next_queue(thread_master_t *m)
 {
-	int sav_errno;
 	int last_epoll_errno = 0;
 	int ret;
 	int i;
@@ -1572,30 +1666,34 @@ thread_fetch_next_queue(thread_master_t *m)
 
 		/* Call epoll function. */
 		ret = epoll_wait(m->epoll_fd, m->epoll_events, m->epoll_count, -1);
-		sav_errno = errno;
 
 #ifdef _EPOLL_DEBUG_
 		if (do_epoll_debug) {
+			int sav_errno = errno;
+
 			if (ret == -1)
 				log_message(LOG_INFO, "epoll_wait returned %d, errno %d", ret, sav_errno);
 			else
 				log_message(LOG_INFO, "epoll_wait returned %d fds", ret);
+
+			errno = sav_errno;
 		}
 #endif
 
 		if (ret < 0) {
-			if (sav_errno == EINTR)
+			if (check_EINTR(errno))
 				continue;
 
 			/* Real error. */
-			if (sav_errno != last_epoll_errno) {
+			if (errno != last_epoll_errno) {
+				last_epoll_errno = errno;
+
 				/* Log the error first time only */
-				log_message(LOG_INFO, "scheduler: epoll_wait error: %s", strerror(sav_errno));
-				last_epoll_errno = sav_errno;
+				log_message(LOG_INFO, "scheduler: epoll_wait error: %s", strerror(errno));
 			}
 
 			/* Make sure we don't sit it a tight loop */
-			if (sav_errno == EBADF || sav_errno == EFAULT || sav_errno == EINVAL)
+			if (last_epoll_errno == EBADF || last_epoll_errno == EFAULT || last_epoll_errno == EINVAL)
 				sleep(1);
 
 			continue;
@@ -1622,6 +1720,11 @@ thread_fetch_next_queue(thread_master_t *m)
 					ev->write = NULL;
 				}
 
+				if (__test_bit(LOG_DETAIL_BIT, &debug)) {
+					if (ep_ev->events & EPOLLRDHUP)
+						log_message(LOG_INFO, "Received EPOLLRDHUP for fd %d", ev->fd);
+				}
+
 				continue;
 			}
 
@@ -1630,7 +1733,7 @@ thread_fetch_next_queue(thread_master_t *m)
 				if (!ev->read) {
 					log_message(LOG_INFO, "scheduler: No read thread bound on fd:%d (fl:0x%.4X)"
 						      , ev->fd, ep_ev->events);
-					assert(0);
+					continue;
 				}
 				thread_move_ready(m, &m->read, ev->read, THREAD_READY_FD);
 				ev->read = NULL;
@@ -1641,18 +1744,10 @@ thread_fetch_next_queue(thread_master_t *m)
 				if (!ev->write) {
 					log_message(LOG_INFO, "scheduler: No write thread bound on fd:%d (fl:0x%.4X)"
 						      , ev->fd, ep_ev->events);
-					assert(0);
+					continue;
 				}
 				thread_move_ready(m, &m->write, ev->write, THREAD_READY_FD);
 				ev->write = NULL;
-			}
-
-			if (ep_ev->events & EPOLLHUP) {
-				log_message(LOG_INFO, "Received EPOLLHUP for fd %d", ev->fd);
-			}
-
-			if (ep_ev->events & EPOLLERR) {
-				log_message(LOG_INFO, "Received EPOLLERR for fd %d", ev->fd);
 			}
 		}
 
@@ -1710,7 +1805,12 @@ process_threads(thread_master_t *m)
 		thread = thread_trim_head(thread_list);
 		if (!shutting_down ||
 		    (thread->type == THREAD_READY_FD &&
-		     (thread->u.fd == m->timer_fd || thread->u.fd == m->signal_fd)) ||
+		     (thread->u.f.fd == m->timer_fd ||
+		      thread->u.f.fd == m->signal_fd
+#ifdef _WITH_SNMP_
+		      || FD_ISSET(thread->u.f.fd, &m->snmp_fdset)
+#endif
+							       )) ||
 		    thread->type == THREAD_CHILD ||
 		    thread->type == THREAD_CHILD_TIMEOUT ||
 		    thread->type == THREAD_CHILD_TERMINATED ||
@@ -1755,7 +1855,7 @@ process_child_termination(pid_t pid, int status)
 
 #ifdef _EPOLL_DEBUG_
 	if (do_epoll_debug)
-		log_message(LOG_INFO, "Child %d terminated with status 0x%x, thread_id %lu", pid, status, thread ? thread->id : 0);
+		log_message(LOG_INFO, "Child %d terminated with status 0x%x, thread_id %lu", pid, (unsigned)status, thread ? thread->id : 0);
 #endif
 
 	if (!thread)
@@ -1788,20 +1888,27 @@ thread_child_handler(__attribute__((unused)) void *v, __attribute__((unused)) in
 		if (pid == -1) {
 			if (errno == ECHILD)
 				return;
-			DBG("waitpid error: %s", strerror(errno));
+			log_message(LOG_DEBUG, "waitpid error %d: %s", errno, strerror(errno));
 			assert(0);
+
+			return;
 		}
 		process_child_termination(pid, status);
 	}
 }
 
 void
-thread_add_base_threads(thread_master_t *m)
+thread_add_base_threads(thread_master_t *m,
+#ifndef _WITH_SNMP_
+					    __attribute__ ((unused))
+#endif
+								     bool with_snmp)
 {
-	m->timer_thread = thread_add_read(m, thread_timerfd_handler, NULL, m->timer_fd, TIMER_NEVER);
+	m->timer_thread = thread_add_read(m, thread_timerfd_handler, NULL, m->timer_fd, TIMER_NEVER, false);
 	add_signal_read_thread(m);
 #ifdef _WITH_SNMP_
-	m->snmp_timer_thread = thread_add_timer(m, snmp_timeout_thread, 0, TIMER_NEVER);
+	if (with_snmp)
+		m->snmp_timer_thread = thread_add_timer(m, snmp_timeout_thread, 0, TIMER_NEVER);
 #endif
 }
 

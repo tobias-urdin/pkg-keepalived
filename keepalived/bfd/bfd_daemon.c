@@ -49,16 +49,19 @@
 #include "scheduler.h"
 #include "process.h"
 #include "utils.h"
+#ifdef _WITH_CN_PROC_
+#include "track_process.h"
+#endif
 
 /* Global variables */
 int bfd_vrrp_event_pipe[2] = { -1, -1};
 int bfd_checker_event_pipe[2] = { -1, -1};
 
 /* Local variables */
-static char *bfd_syslog_ident;
+static const char *bfd_syslog_ident;
 
 #ifndef _DEBUG_
-static int reload_bfd_thread(thread_t *);
+static int reload_bfd_thread(thread_ref_t);
 #endif
 
 /* Daemon stop sequence */
@@ -99,10 +102,10 @@ stop_bfd(int status)
 	closelog();
 
 #ifndef _MEM_CHECK_LOG_
-	FREE_PTR(bfd_syslog_ident);
+	FREE_CONST_PTR(bfd_syslog_ident);
 #else
 	if (bfd_syslog_ident)
-		free(bfd_syslog_ident);
+		free(no_const_char_p(bfd_syslog_ident));
 #endif
 	close_std_fd();
 
@@ -134,9 +137,9 @@ open_bfd_pipes(void)
 
 /* Daemon init sequence */
 static void
-start_bfd(__attribute__((unused)) data_t *old_global_data)
+start_bfd(__attribute__((unused)) data_t *prev_global_data)
 {
-	srand(time(NULL));
+	srandom(time(NULL));
 
 	if (reload)
 		global_data = alloc_global_data();
@@ -148,12 +151,15 @@ start_bfd(__attribute__((unused)) data_t *old_global_data)
 	alloc_bfd_buffer();
 
 	init_data(conf_file, bfd_init_keywords);
-	/* At the moment bfd doesn't need global data initialising, but
-	 * leave the call here but commented out so we know where we want it
-	 * it if is needed.
 	if (reload)
-		init_global_data(global_data, old_global_data);
-	*/
+		init_global_data(global_data, prev_global_data, true);
+
+	/* Update process name if necessary */
+	if ((!reload && global_data->bfd_process_name) ||
+	    (reload &&
+	     (!global_data->bfd_process_name != !prev_global_data->bfd_process_name ||
+	      (global_data->bfd_process_name && strcmp(global_data->bfd_process_name, prev_global_data->bfd_process_name)))))
+		set_process_name(global_data->bfd_process_name);
 
 	/* If we are just testing the configuration, then we terminate now */
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
@@ -180,6 +186,11 @@ start_bfd(__attribute__((unused)) data_t *old_global_data)
 #endif
 #endif
 			global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
+
+#ifdef _HAVE_SCHED_RT_
+	/* Set the process cpu affinity if configured */
+	set_process_cpu_affinity(&global_data->bfd_cpu_mask, "bfd");
+#endif
 }
 
 void
@@ -218,7 +229,7 @@ bfd_signal_init(void)
 
 /* Reload thread */
 static int
-reload_bfd_thread(__attribute__((unused)) thread_t * thread)
+reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	timeval_t timer;
 	timer = timer_now();
@@ -233,8 +244,8 @@ reload_bfd_thread(__attribute__((unused)) thread_t * thread)
 
 	/* Destroy master thread */
 	bfd_dispatcher_release(bfd_data);
-	thread_destroy_master(master);
-	master = thread_make_master();
+	thread_cleanup_master(master);
+	thread_add_base_threads(master, false);
 
 	old_bfd_data = bfd_data;
 	bfd_data = NULL;
@@ -251,14 +262,14 @@ reload_bfd_thread(__attribute__((unused)) thread_t * thread)
 	UNSET_RELOAD;
 
 	set_time_now();
-	log_message(LOG_INFO, "Reload finished in %li usec", -timer_long(timer_sub_now(timer)));
+	log_message(LOG_INFO, "Reload finished in %lu usec", -timer_long(timer_sub_now(timer)));
 
 	return 0;
 }
 
 /* BFD Child respawning thread */
 static int
-bfd_respawn_thread(thread_t * thread)
+bfd_respawn_thread(thread_ref_t thread)
 {
 	/* We catch a SIGCHLD, handle it */
 	bfd_child = 0;
@@ -300,7 +311,7 @@ start_bfd_child(void)
 #ifndef _DEBUG_
 	pid_t pid;
 	int ret;
-	char *syslog_ident;
+	const char *syslog_ident;
 
 	/* Initialize child process */
 #ifdef ENABLE_LOG_TO_FILE
@@ -327,9 +338,12 @@ start_bfd_child(void)
 
 	prog_type = PROG_TYPE_BFD;
 
-	/* Close the read end of the event notification pipes */
+	/* Close the read end of the event notification pipes, and the track_process fd */
 #ifdef _WITH_VRRP_
 	close(bfd_vrrp_event_pipe[0]);
+#ifdef _WITH_CN_PROC_
+	close_track_processes();
+#endif
 #endif
 #ifdef _WITH_LVS_
 	close(bfd_checker_event_pipe[0]);
@@ -390,9 +404,6 @@ start_bfd_child(void)
 	if (ret < 0) {
 		log_message(LOG_INFO, "BFD child process: error chdir");
 	}
-
-	/* Set mask */
-	umask(0);
 #endif
 
 	/* If last process died during a reload, we can get there and we
