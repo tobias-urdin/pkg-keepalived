@@ -1,4 +1,4 @@
-keepalived (1:2.0.19-1) UNRELEASED; urgency=medium
+keepalived (1:2.0.19-1) unstable; urgency=medium
 
   * [3e69686] New upstream version 2.0.19 (Closes: #947472)
     - fixes execution of scripts with /bin/sh (Closes: #931617)
@@ -12,7 +12,7 @@ keepalived (1:2.0.19-1) UNRELEASED; urgency=medium
   * [239c70f] Fix location of the ip_vs header file
   * [ee338dc] Update changelog
 
- -- Alexander Wirt <formorer@debian.org>  Sun, 05 Jan 2020 18:24:01 +0100
+ -- Alexander Wirt <formorer@debian.org>  Sun, 05 Jan 2020 18:45:43 +0100
 
 keepalived (1:2.0.10-1) unstable; urgency=medium
 
