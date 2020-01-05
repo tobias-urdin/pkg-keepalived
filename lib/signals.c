@@ -28,18 +28,19 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <errno.h>
-#ifndef _DEBUG_
-#define NDEBUG
-#endif
-#include <assert.h>
 #ifdef HAVE_SIGNALFD
 #include <sys/signalfd.h>
 #endif
+#ifdef _INCLUDE_UNUSED_CODE_
+#include <sys/epoll.h>
+#endif
+#include <inttypes.h>
 
 #include "signals.h"
 #include "utils.h"
 #include "logger.h"
 #include "scheduler.h"
+#include "assert_debug.h"
 
 #ifdef _WITH_JSON_
 #include "../keepalived/include/vrrp_json.h"
@@ -94,9 +95,9 @@ static sigset_t dfl_sig;
 static sigset_t parent_sig;
 
 /* Signal handling thread */
-static thread_t *signal_thread;
+static thread_ref_t signal_thread;
 
-int
+int __attribute__((pure))
 get_signum(const char *sigfunc)
 {
 	if (!strcmp(sigfunc, "STOP"))
@@ -155,37 +156,32 @@ log_sigxcpu(__attribute__((unused)) void * ptr, __attribute__((unused)) int sign
 
 #ifdef _INCLUDE_UNUSED_CODE_
 /* Local signal test */
-int
+bool
 signal_pending(void)
 {
-	fd_set readset;
 	int rc;
-	struct timeval timeout = {
-		.tv_sec = 0,
-		.tv_usec = 0
-	};
+	int efd;
+	struct epoll_event ev = { .events = EPOLLIN };
 
-	FD_ZERO(&readset);
+	efd = epoll_create(1);
 #ifdef HAVE_SIGNALFD
-	FD_SET(signal_fd, &readset);
-
-	rc = select(signal_fd + 1, &readset, NULL, NULL, &timeout);
+	epoll_ctl(efd, EPOLL_CTL_ADD, signal_fd,  &ev);
 #else
-	FD_SET(signal_pipe[0], &readset);
-
-	rc = select(signal_pipe[0] + 1, &readset, NULL, NULL, &timeout);
+	epoll_ctl(efd, EPOLL_CTL_ADD, signal_pipe[0],  &ev);
 #endif
+	rc = epoll_wait(efd, &ev, 1, 0);
+	close(efd);
 
-	return rc > 0 ? 1 : 0;
+	return rc > 0;
 }
 #endif
 
 /* Signal flag */
 #ifndef HAVE_SIGNALFD
 static void
-signal_handler(int sig)
+signal_handler(uint32_t sig)
 {
-	if (write(signal_pipe[1], &sig, sizeof(int)) != sizeof(int)) {
+	if (write(signal_pipe[1], &sig, sizeof(uint32_t)) != sizeof(uint32_t)) {
 		DBG("signal_pipe write error %s", strerror(errno));
 		assert(0);
 
@@ -309,21 +305,25 @@ signal_ignore(int signo)
 
 /* Handlers callback  */
 static int
-signal_run_callback(thread_t *thread)
+signal_run_callback(thread_ref_t thread)
 {
-	int sig;
+	uint32_t sig;
 #ifdef HAVE_SIGNALFD
 	struct signalfd_siginfo siginfo;
 
 	while (read(signal_fd, &siginfo, sizeof(struct signalfd_siginfo)) == sizeof(struct signalfd_siginfo)) {
 		sig = siginfo.ssi_signo;
 #else
-	while (read(signal_pipe[0], &sig, sizeof(int)) == sizeof(int)) {
+	while (read(signal_pipe[0], &sig, sizeof(uint32_t)) == sizeof(uint32_t)) {
 #endif
 
 #ifdef _EPOLL_DEBUG_
-		if (do_epoll_debug)
-			log_message(LOG_INFO, "Signal %d, func %s()", sig, get_signal_function_name(signal_handler_func[sig-1]));
+		if (do_epoll_debug) {
+			if (sig >= 1 && sig < sizeof(signal_handler_func) / sizeof(signal_handler_func[0]))
+				log_message(LOG_INFO, "Signal %" PRIu32 ", func %s()", sig, get_signal_function_name(signal_handler_func[sig-1]));
+			else
+				log_message(LOG_INFO, "Signal %" PRIu32 ", unknown function", sig);
+		}
 #endif
 
 #ifdef USE_SIGNAL_THREADS
@@ -344,7 +344,7 @@ signal_run_callback(thread_t *thread)
 #endif
 	}
 
-	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.fd, TIMER_NEVER);
+	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, false);
 
 	return 0;
 }
@@ -360,9 +360,9 @@ clear_signal_handler_addresses(void)
 
 /* Handlers intialization */
 void
-add_signal_read_thread(thread_master_t *master)
+add_signal_read_thread(thread_master_t *thread_master)
 {
-	signal_thread = thread_add_read(master, signal_run_callback, NULL, master->signal_fd, TIMER_NEVER);
+	signal_thread = thread_add_read(thread_master, signal_run_callback, NULL, thread_master->signal_fd, TIMER_NEVER, false);
 }
 
 void

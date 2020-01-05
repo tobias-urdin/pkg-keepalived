@@ -50,10 +50,12 @@
 #define LINK_DOWN 0
 #define POLLING_DELAY TIMER_HZ
 
+#ifdef _WITH_LINKBEAT_
 /* Interface Linkbeat code selection */
 #define LB_IOCTL   0x1
 #define LB_MII     0x2
 #define LB_ETHTOOL 0x4
+#endif
 
 /* I don't know what the correct type is.
  * The kernel has ifindex in the range [1, INT_MAX], but IFLA_LINK is defined
@@ -75,23 +77,61 @@ typedef struct _garp_delay {
 	int			aggregation_group;	/* Index of multi-interface group */
 } garp_delay_t;
 
+#ifdef _HAVE_VRRP_VMAC_
+typedef enum {
+	IF_TYPE_STANDARD,
+	IF_TYPE_MACVLAN,
+#ifdef _HAVE_VRRP_IPVLAN_
+	IF_TYPE_IPVLAN,
+#endif
+#ifdef _HAVE_VRF_
+	IF_TYPE_VRF,
+#endif
+} if_type_t;
+
+#ifdef _HAVE_VRRP_IPVLAN_
+#define IS_VLAN(IFP)	((IFP)->if_type == IF_TYPE_MACVLAN || (IFP)->if_type == IF_TYPE_IPVLAN)
+#else
+#define IS_VLAN(IFP)	((IFP)->if_type == IF_TYPE_MACVLAN)
+#endif
+
+#endif
+
+/* <net/if_arp.h> defines MAX_ADDR_LEN as 7, whereas <linux/netdevice.h> defines it as 32.
+ * Make sure we have the right definition. */
+#if MAX_ADDR_LEN == 7
+#error "MAX_ADDR_LEN == 7 - probably <net/if_arp.h> was included after <linux/netdevice.h>"
+#elif MAX_ADDR_LEN != 32
+#error "MAX_ADDR_LEN != 32 - probably <net/if_arp.h> was included after <linux/netdevice.h>"
+#endif
+
 /* Interface structure definition */
 typedef struct _interface {
 	char			ifname[IFNAMSIZ];	/* Interface name */
 	ifindex_t		ifindex;		/* Interface index */
+#ifdef _WITH_VRRP_
 	struct in_addr		sin_addr;		/* IPv4 primary IPv4 address */
-	struct in6_addr		sin6_addr;		/* IPv6 link address */
+	struct in6_addr		sin6_addr;		/* IPv6 primary link local address */
+	list			sin_addr_l;		/* List of extra IPv4 interface addresses - struct in_addr */
+	list			sin6_addr_l;		/* List of extra IPv6 interface addresses - struct in6_addr */
+#endif
 	unsigned		ifi_flags;		/* Kernel flags */
-	bool			linkbeat_use_polling;	/* Poll the interface for status, rather than use netlink */
 	uint32_t		mtu;			/* MTU for this interface_t */
 	unsigned short		hw_type;		/* Type of hardware address */
 	u_char			hw_addr[MAX_ADDR_LEN];	/* MAC address */
 	u_char			hw_addr_bcast[MAX_ADDR_LEN]; /* broadcast address */
 	size_t			hw_addr_len;		/* MAC addresss length */
+#ifdef _WITH_LINKBEAT_
+	bool			linkbeat_use_polling;	/* Poll the interface for status, rather than use netlink */
 	int			lb_type;		/* Interface regs selection */
+#endif
 #ifdef _HAVE_VRRP_VMAC_
-	int			vmac_type;		/* Set if interface is a VMAC interface */
+	if_type_t		if_type;		/* interface type */
+	int			vmac_type;		/* Type of macvlan or ipvlan */
 	ifindex_t		base_ifindex;		/* Only used at startup if we find vmac i/f before base i/f */
+#ifdef HAVE_IFLA_LINK_NETNSID
+	int			base_netns_id;		/* Network namespace of the parent interface */
+#endif
 	struct _interface	*base_ifp;		/* Base interface (if interface is a VMAC interface),
 							   otherwise the physical interface */
 	bool			is_ours;		/* keepalived created the interface */
@@ -107,6 +147,7 @@ typedef struct _interface {
 	unsigned		rp_filter;		/* < UINT_MAX if we have changed the value */
 #endif
 	garp_delay_t		*garp_delay;		/* Delays for sending gratuitous ARP/NA */
+	timeval_t		last_gna_router_check;	/* Time we last checked if IPv6 forwarding set on interface */
 	bool			gna_router;		/* Router flag for NA messages */
 	bool			promote_secondaries;	/* Original value of promote_secondaries to be restored */
 	uint32_t		reset_promote_secondaries; /* Count of how many vrrps have changed promote_secondaries on interface */
@@ -116,6 +157,7 @@ typedef struct _interface {
 /* Tracked interface structure definition */
 typedef struct _tracked_if {
 	int			weight;		/* tracking weight when non-zero */
+	bool			weight_reverse; /* which direction is the weight applied */
 	interface_t		*ifp;		/* interface backpointer, cannot be NULL */
 } tracked_if_t;
 
@@ -132,8 +174,10 @@ typedef struct _tracked_if {
 #define IF_ADDR(X) ((X)->sin_addr.s_addr)
 #define IF_ADDR6(X)	((X)->sin6_addr)
 #define IF_HWADDR(X) ((X)->hw_addr)
+#ifdef _WITH_LINKBEAT_
 #define IF_MII_SUPPORTED(X) ((X)->lb_type & LB_MII)
 #define IF_ETHTOOL_SUPPORTED(X) ((X)->lb_type & LB_ETHTOOL)
+#endif
 #define FLAGS_UP(X) (((X) & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING))
 #define IF_FLAGS_UP(X) (FLAGS_UP((X)->ifi_flags))
 #ifdef _HAVE_VRRP_VMAC_
@@ -150,18 +194,21 @@ typedef enum if_lookup {
 } if_lookup_t;
 
 /* Global data */
-list garp_delay;
+extern list garp_delay;
 
 /* prototypes */
-extern interface_t *if_get_by_ifindex(ifindex_t);
+extern interface_t *if_get_by_ifindex(ifindex_t) __attribute__ ((pure));
 extern interface_t *if_get_by_ifname(const char *, if_lookup_t);
-extern list get_if_list(void);
+extern list get_if_list(void) __attribute__ ((pure));
 extern void reset_interface_queue(void);
 extern void alloc_garp_delay(void);
 extern void set_default_garp_delay(void);
 extern void if_add_queue(interface_t *);
 extern void init_interface_queue(void);
+#ifdef _WITH_LINKBEAT_
 extern void init_interface_linkbeat(void);
+extern void close_interface_linkbeat(void);
+#endif
 extern void free_interface_queue(void);
 extern void free_old_interface_queue(void);
 extern int if_join_vrrp_group(sa_family_t, int *, interface_t *);
@@ -181,7 +228,8 @@ extern int if_setsockopt_no_receive(int *);
 extern void interface_up(interface_t *);
 extern void interface_down(interface_t *);
 extern void cleanup_lost_interface(interface_t *);
-extern int recreate_vmac_thread(thread_t *);
+extern int recreate_vmac_thread(thread_ref_t);
+void update_mtu(interface_t *);
 extern void update_added_interface(interface_t *);
 #ifdef THREAD_DUMP
 extern void register_vrrp_if_addresses(void);

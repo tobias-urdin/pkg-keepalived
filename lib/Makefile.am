@@ -16,12 +16,13 @@ BUILT_SOURCES		= $(GIT_COMMIT_FILE)
 noinst_LIBRARIES	= liblib.a
 
 liblib_a_SOURCES	= memory.c utils.c notify.c timer.c scheduler.c \
-	vector.c list.c html.c parser.c signals.c logger.c assert.c \
-	list_head.c rbtree.c process.c \
-	bitops.h timer.h scheduler.h vector.h parser.h \
-	signals.h notify.h logger.h list.h memory.h html.h utils.h \
-	keepalived_magic.h list_head.h rbtree.h process.h \
-	rbtree_augmented.h
+			  vector.c list.c html.c parser.c signals.c logger.c \
+			  list_head.c rbtree.c process.c json_writer.c \
+			  bitops.h timer.h scheduler.h vector.h parser.h \
+			  signals.h notify.h logger.h list.h memory.h html.h utils.h \
+			  keepalived_magic.h list_head.h rbtree.h process.h \
+			  rbtree_augmented.h assert_debug.h json_writer.h \
+			  warnings.h container.h
 
 liblib_a_LIBADD		=
 EXTRA_liblib_a_SOURCES	=
@@ -36,9 +37,16 @@ if ! SOCK_NONBLOCK
   EXTRA_liblib_a_SOURCES += old_socket.c old_socket.h
 endif
 
+if ASSERTS
+  liblib_a_LIBADD	+= assert.o
+  EXTRA_liblib_a_SOURCES += assert.c old_socket.h
+endif
+
 EXTRA_DIST		= $(GIT_COMMIT_FILE)
 
 MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
+
+CLEANFILES		= $(GIT_COMMIT_FILE)
 
 FORCE:
 
