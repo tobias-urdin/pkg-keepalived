@@ -3,7 +3,7 @@ Section: admin
 Priority: optional
 Maintainer: Alexander Wirt <formorer@debian.org>
 Build-Depends: autoconf,
-               debhelper (>= 11),
+               debhelper-compat (=12),
                libglib2.0-dev,
                libjson-c-dev,
                libnl-3-dev,
