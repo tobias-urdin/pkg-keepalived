@@ -10,7 +10,8 @@ keepalived (1:2.0.19-1) unstable; urgency=medium
   * [6a81734] Move to debhelper(-compat) 12
   * [02d9f5d] Bump standards version
   * [239c70f] Fix location of the ip_vs header file
-  * [ee338dc] Update changelog
+  * [495b6e5] Disable dbus create instance feature
+  * [ec5c22c] Enable iptc support
 
  -- Alexander Wirt <formorer@debian.org>  Sun, 05 Jan 2020 18:45:43 +0100
 
