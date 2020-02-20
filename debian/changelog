@@ -1,3 +1,10 @@
+keepalived (1:2.0.19-2) unstable; urgency=medium
+
+  [ Thomas Goirand ]
+  * Drop build-depends on iptables-dev (Closes: #946150).
+
+ -- Alexander Wirt <formorer@debian.org>  Thu, 20 Feb 2020 12:16:19 +0100
+
 keepalived (1:2.0.19-1) unstable; urgency=medium
 
   * [3e69686] New upstream version 2.0.19 (Closes: #947472)

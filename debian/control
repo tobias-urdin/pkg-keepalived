@@ -16,7 +16,6 @@ Build-Depends: autoconf,
 	       libnftnl-dev,
                libipset-dev,
 	       libip4tc-dev,
-               iptables-dev,
                linux-libc-dev,
                pkg-config
 Standards-Version: 4.4.1
