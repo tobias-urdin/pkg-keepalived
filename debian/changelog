@@ -3,6 +3,7 @@ keepalived (1:2.1.5-0.1) unstable; urgency=medium
   * Non-maintainer upload.
   * [efada46] New upstream version 2.1.5 (Closes: #964855)
     - fixes segfault when SMTP notifications are enabled (Closes: #958898)
+  * [0f2ffa3] Fix d/watch: 403 Forbidden
 
  -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 07 Oct 2020 16:54:33 +0200
 
