@@ -166,7 +166,7 @@ cmd_str(const notify_script_t *script)
 
 /* Execute external script/program to process FIFO */
 static pid_t
-notify_fifo_exec(thread_master_t *m, int (*func) (thread_ref_t), void *arg, notify_script_t *script)
+notify_fifo_exec(thread_master_t *m, thread_func_t func, void *arg, notify_script_t *script)
 {
 	pid_t pid;
 	int retval;
@@ -224,7 +224,7 @@ notify_fifo_exec(thread_master_t *m, int (*func) (thread_ref_t), void *arg, noti
 }
 
 static void
-fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *type)
+fifo_open(notify_fifo_t* fifo, thread_func_t script_exit, const char *type)
 {
 	int ret;
 	int sav_errno;
@@ -267,7 +267,7 @@ fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *typ
 }
 
 void
-notify_fifo_open(notify_fifo_t* global_fifo, notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *type)
+notify_fifo_open(notify_fifo_t* global_fifo, notify_fifo_t* fifo, thread_func_t script_exit, const char *type)
 {
 	/* Open the global FIFO if specified */
 	if (global_fifo->name)
@@ -391,7 +391,7 @@ notify_exec(const notify_script_t *script)
 }
 
 int
-system_call_script(thread_master_t *m, int (*func) (thread_ref_t), void * arg, unsigned long timer, notify_script_t* script)
+system_call_script(thread_master_t *m, thread_func_t func, void * arg, unsigned long timer, notify_script_t* script)
 {
 	pid_t pid;
 
@@ -412,6 +412,10 @@ system_call_script(thread_master_t *m, int (*func) (thread_ref_t), void * arg, u
 	if (pid) {
 		/* parent process */
 		thread_add_child(m, func, arg, pid, timer);
+#ifdef _SCRIPT_DEBUG_
+		if (do_script_debug)
+			log_message(LOG_INFO, "Running script with pid %d, timer %lu.%6.6lu", pid, timer / TIMER_HZ, timer % TIMER_HZ);
+#endif
 		return 0;
 	}
 
@@ -425,7 +429,7 @@ system_call_script(thread_master_t *m, int (*func) (thread_ref_t), void * arg, u
 	exit(0); /* Script errors aren't server errors */
 }
 
-int
+void
 child_killed_thread(thread_ref_t thread)
 {
 	thread_master_t *m = thread->master;
@@ -438,8 +442,6 @@ child_killed_thread(thread_ref_t thread)
 	 * termination process */
 	if (!&m->child.rb_root.rb_node && !m->shutdown_timer_running)
 		thread_add_terminate_event(m);
-
-	return 0;
 }
 
 void
@@ -795,20 +797,21 @@ check_security(const char *filename, bool using_script_security)
 	return flags;
 }
 
-int
+unsigned
 check_script_secure(notify_script_t *script,
 #ifndef _HAVE_LIBMAGIC_
 					     __attribute__((unused))
 #endif
 								     magic_t magic)
 {
-	int flags;
+	unsigned flags;
 	int ret, ret_real, ret_new;
 	struct stat file_buf, real_buf;
 	bool need_script_protection = false;
 	uid_t old_uid = 0;
 	gid_t old_gid = 0;
 	char *new_path;
+	char *sav_path;
 	int sav_errno;
 	char *real_file_path;
 	char *orig_file_part, *new_file_part;
@@ -866,6 +869,12 @@ check_script_secure(notify_script_t *script,
 		return SC_NOTFOUND;
 	}
 
+	/* It is much easier to ensure that new_path is part of
+	 * keepalived's malloc handling. */
+	sav_path = new_path;
+	new_path = STRDUP(new_path);
+	free(sav_path);	/* malloc'd returned by realpath() */
+
 	real_file_path = NULL;
 
 	orig_file_part = strrchr(script->args[0], '/');
@@ -897,15 +906,12 @@ check_script_secure(notify_script_t *script,
 		}
 
 		if (strcmp(script->args[0], new_path)) {
-	 		/* We need to set up all the args again */
+			/* We need to set up all the args again */
 			replace_cmd_name(script, new_path);
 		}
 	}
 
-	if (!real_file_path)
-		free(new_path);
-	else
-		FREE(new_path);
+	FREE(new_path);
 
 	/* Get the permissions for the file itself */
 	if (stat(real_file_path ? real_file_path : script->args[0], &file_buf)) {
@@ -940,7 +946,7 @@ check_script_secure(notify_script_t *script,
 
 	if (!need_script_protection) {
 		if (real_file_path)
-			free(real_file_path);
+			FREE(real_file_path);
 
 		return flags;
 	}
@@ -950,16 +956,16 @@ check_script_secure(notify_script_t *script,
 
 	if (real_file_path) {
 		flags |= check_security(real_file_path, script_security);
-		free(real_file_path);
+		FREE(real_file_path);
 	}
 
 	return flags;
 }
 
-int
+unsigned
 check_notify_script_secure(notify_script_t **script_p, magic_t magic)
 {
-	int flags;
+	unsigned flags;
 	notify_script_t *script = *script_p;
 
 	if (!script)

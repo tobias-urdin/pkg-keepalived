@@ -22,10 +22,8 @@
 
 #include "config.h"
 
+#include <stdio.h>
 #include <fcntl.h>
-
-/* keepalived include */
-#include "utils.h"
 
 /* genhash includes */
 #include "include/layer4.h"
@@ -98,8 +96,10 @@ tcp_socket_state(thread_ref_t thread, thread_func_t func)
 
 	/* Handle connection timeout */
 	if (thread->type == THREAD_WRITE_TIMEOUT) {
-		DBG("TCP connection timeout to [%s]:%d.\n",
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "TCP connection timeout to [%s]:%d.\n",
 		    req->ipaddress, ntohs(req->addr_port));
+#endif
 		thread_close_fd(thread);
 		return connect_timeout;
 	}
@@ -112,8 +112,10 @@ tcp_socket_state(thread_ref_t thread, thread_func_t func)
 
 	/* Connection failed !!! */
 	if (ret) {
-		DBG("TCP getsockopt() failed to [%s]:%d.\n",
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "TCP getsockopt() failed to [%s]:%d.\n",
 		    req->ipaddress, ntohs(req->addr_port));
+#endif
 		thread_close_fd(thread);
 		return connect_error;
 	}
@@ -124,16 +126,20 @@ tcp_socket_state(thread_ref_t thread, thread_func_t func)
 	 * Recompute the write timeout (or pending connection).
 	 */
 	if (status == EINPROGRESS) {
-		DBG("TCP connection to [%s]:%d still IN_PROGRESS.\n",
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "TCP connection to [%s]:%d still IN_PROGRESS.\n",
 		    req->ipaddress, ntohs(req->addr_port));
+#endif
 
 		timer_min = timer_sub_now(thread->sands);
 		thread_add_write(thread->master, func, THREAD_ARG(thread)
 				 , thread->u.f.fd, timer_long(timer_min), true);
 		return connect_in_progress;
 	} else if (status) {
-		DBG("TCP connection failed to [%s]:%d.\n",
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "TCP connection failed to [%s]:%d.\n",
 		    req->ipaddress, ntohs(req->addr_port));
+#endif
 		thread_close_fd(thread);
 		return connect_error;
 	}
@@ -168,7 +174,7 @@ tcp_connection_state(int fd, enum connect_result status, thread_ref_t thread
 	}
 }
 
-static int
+static void
 tcp_check_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -177,17 +183,21 @@ tcp_check_thread(thread_ref_t thread)
 	sock_obj->status = tcp_socket_state(thread, tcp_check_thread);
 	switch (sock_obj->status) {
 	case connect_error:
-		DBG("Error connecting server [%s]:%d.\n",
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "Error connecting server [%s]:%d.\n",
 		    req->ipaddress, ntohs(req->addr_port));
+#endif
 		thread_add_terminate_event(thread->master);
-		return -1;
+		return;
 		break;
 
 	case connect_timeout:
-		DBG("Timeout connecting server [%s]:%d.\n",
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "Timeout connecting server [%s]:%d.\n",
 		    req->ipaddress, ntohs(req->addr_port));
+#endif
 		thread_add_terminate_event(thread->master);
-		return -1;
+		return;
 		break;
 
 	case connect_success:{
@@ -197,7 +207,7 @@ tcp_check_thread(thread_ref_t thread)
 			if (ret) {
 				/* SSL connections manage their own threads for SSL_connect */
 				if (req->ssl)
-					return 1;
+					return;
 
 				/* Remote WEB server is connected.
 				 * Unlock eventual locked socket.
@@ -207,21 +217,21 @@ tcp_check_thread(thread_ref_t thread)
 						 http_request_thread, sock_obj, 0);
 				thread_del_write(thread);
 			} else {
-				DBG("Connection trouble to: [%s]:%d.\n",
+#ifdef _GENHASH_DEBUG_
+				fprintf(stderr, "Connection trouble to: [%s]:%d.\n",
 				    req->ipaddress,
 				    ntohs(req->addr_port));
+#endif
 				sock_obj->status = connect_error;
 				thread_add_terminate_event(thread->master);
-				return -1;
+				return;
 			}
 		}
 		break;
 	}
-
-	return 1;
 }
 
-int
+void
 tcp_connect_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -232,8 +242,10 @@ tcp_connect_thread(thread_ref_t thread)
 					       | SOCK_CLOEXEC
 #endif
 							     , IPPROTO_TCP)) == -1) {
-		DBG("WEB connection fail to create socket.\n");
-		return 0;
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "WEB connection fail to create socket.\n");
+#endif
+		return;
 	}
 
 #if !HAVE_DECL_SOCK_NONBLOCK
@@ -246,5 +258,4 @@ tcp_connect_thread(thread_ref_t thread)
 	/* handle tcp connection status & register check worker thread */
 	tcp_connection_state(sock_obj->fd, sock_obj->status, thread, tcp_check_thread,
 			     req->timeout);
-	return 0;
 }

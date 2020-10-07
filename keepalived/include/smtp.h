@@ -91,7 +91,7 @@ do {					\
 typedef struct _smtp {
 	int		fd;
 	int		stage;
-	element		next_email_element;
+	email_t		*next_email_element;
 	char		*subject;
 	char		*body;
 	char		*buffer;
@@ -127,6 +127,9 @@ typedef void vrrp_sgroup_t;
 
 #ifdef _SMTP_ALERT_DEBUG_
 extern bool do_smtp_alert_debug;
+#endif
+#ifdef _SMTP_CONNECT_DEBUG_
+extern bool do_smtp_connect_debug;
 #endif
 
 /* Prototypes defs */

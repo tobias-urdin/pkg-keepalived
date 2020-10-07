@@ -49,7 +49,7 @@
 
 #include "track_process.h"
 #include "global_data.h"
-#include "list.h"
+#include "list_head.h"
 #if !HAVE_DECL_SOCK_NONBLOCK
 #include "old_socket.h"
 #endif
@@ -59,25 +59,90 @@
 #include "bitops.h"
 #include "logger.h"
 #include "main.h"
+#include "process.h"
 
 
 static thread_ref_t read_thread;
 static thread_ref_t reload_thread;
 static rb_root_t process_tree = RB_ROOT;
 static int nl_sock = -1;
-unsigned num_cpus;
+static unsigned num_cpus;
 static int64_t *cpu_seq;
 static bool need_reinitialise;
+bool proc_events_not_supported;
 
 #ifdef _TRACK_PROCESS_DEBUG_
 bool do_track_process_debug;
+bool do_track_process_debug_detail;
+#endif
+
+#ifdef _INCLUDE_UNUSED_CODE_
+static void
+dump_process_tree(const char *str)
+{
+	tracked_process_instance_t *tpi;
+	ref_tracked_process_t *rtpr;
+
+	log_message(LOG_INFO, "Process tree - %s", str);
+	rb_for_each_entry(tpi, &process_tree, pid_tree) {
+		log_message(LOG_INFO, "Pid %d", tpi->pid);
+		list_for_each_entry(rtpr, &tpi->processes, e_list)
+			log_message(LOG_INFO, "  %s", rtpr->process->pname);
+	}
+}
 #endif
 
 static void
 set_rcv_buf(unsigned buf_size, bool force)
 {
 	if (setsockopt(nl_sock, SOL_SOCKET, force ? SO_RCVBUFFORCE : SO_RCVBUF, &buf_size, sizeof(buf_size)) < 0)
-		log_message(LOG_INFO, "Cannot set process monitor SO_RCVBUF%s option. errno=%d (%m)", force ? "FORCE" : "", errno);
+		log_message(LOG_INFO, "Cannot set process monitor SO_RCVBUF%s option. errno=%d (%m)"
+				    , force ? "FORCE" : "", errno);
+}
+
+static void
+free_ref_tracked_process(ref_tracked_process_t *rtpr)
+{
+	list_del_init(&rtpr->e_list);
+	FREE(rtpr);
+}
+static void
+free_ref_tracked_process_list(list_head_t *l)
+{
+	ref_tracked_process_t *rtpr, *rtpr_tmp;
+
+	list_for_each_entry_safe(rtpr, rtpr_tmp, l, e_list)
+		free_ref_tracked_process(rtpr);
+}
+static ref_tracked_process_t *
+alloc_ref_tracked_process(vrrp_tracked_process_t *tpr, tracked_process_instance_t *tpi)
+{
+	ref_tracked_process_t *new;
+
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->e_list);
+	new->process = tpr;
+	list_add_tail(&new->e_list, &tpi->processes);
+
+	return new;
+}
+static void
+free_tracked_process_instance(tracked_process_instance_t *tpi)
+{
+	free_ref_tracked_process_list(&tpi->processes);
+	rb_erase(&tpi->pid_tree, &process_tree);
+	FREE(tpi);
+}
+static void
+free_process_tree(void)
+{
+	tracked_process_instance_t *tpi, *next;
+
+	rb_for_each_entry_safe(tpi, next, &process_tree, pid_tree) {
+		free_ref_tracked_process_list(&tpi->processes);
+		rb_erase(&tpi->pid_tree, &process_tree);
+		FREE(tpi);
+	}
 }
 
 static int
@@ -87,19 +152,26 @@ pid_compare(const tracked_process_instance_t *tpi1, const tracked_process_instan
 }
 
 static inline tracked_process_instance_t *
+alloc_tracked_process_instance(pid_t pid)
+{
+	tracked_process_instance_t *new;
+
+	PMALLOC(new);
+	INIT_LIST_HEAD(&new->processes);
+	new->pid = pid;
+	RB_CLEAR_NODE(&new->pid_tree);
+	rb_insert_sort(&process_tree, new, pid_tree, pid_compare);
+
+	return new;
+}
+static inline tracked_process_instance_t *
 add_process(pid_t pid, vrrp_tracked_process_t *tpr, tracked_process_instance_t *tpi)
 {
 	tracked_process_instance_t tp = { .pid = pid };
 
-	if (!tpi && !(tpi = rb_search(&process_tree, &tp, pid_tree, pid_compare))) {
-		PMALLOC(tpi);
-		tpi->pid = tp.pid;
-		tpi->processes = alloc_list(NULL, NULL);
-		RB_CLEAR_NODE(&tpi->pid_tree);
-		rb_insert_sort(&process_tree, tpi, pid_tree, pid_compare);
-	}
-
-	list_add(tpi->processes, tpr);
+	if (!tpi && !(tpi = rb_search(&process_tree, &tp, pid_tree, pid_compare)))
+		tpi = alloc_tracked_process_instance(tp.pid);
+	alloc_ref_tracked_process(tpr, tpi);
 	++tpr->num_cur_proc;
 
 	return tpi;
@@ -136,10 +208,10 @@ read_procs(const char *name)
 
 	for (ent_p = namelist, ent = *namelist; ret--; ent = *++ent_p) {
 		log_message(LOG_INFO, "0x%p: %s\n", ent, ent->d_name);
-		free(ent);
+		free(ent);	/* malloc'd by scandir() */
 	}
 
-	free(namelist);
+	free(namelist);	/* malloc'd by scandir() */
 }
 #endif
 
@@ -171,7 +243,7 @@ check_params(vrrp_tracked_process_t *tpr, const char *params, size_t params_len)
 }
 
 static void
-read_procs(list processes)
+read_procs(list_head_t *processes)
 {
 	/* /proc/PID/status has line State: which can be Z for zombie process (but cmdline is empty then)
 	 * /proc/PID/stat has cmd name as 2nd field in (), and state as third field. For states see
@@ -181,7 +253,7 @@ read_procs(list processes)
 	 * To change comm for a process, use prctl(PR_SET_NAME). */
 	DIR *proc_dir = opendir("/proc");
 	struct dirent *ent;
-	char cmdline[22];	/* "/proc/xxxxxxx/cmdline" */
+	char cmdline[1 + 4 + 1 + PID_MAX_DIGITS + 1 + 7 + 1];	/* "/proc/xxxxxxx/cmdline" */
 	int fd;
 	char *cmd_buf;
 	size_t cmd_buf_len;
@@ -192,7 +264,6 @@ read_procs(list processes)
 	ssize_t cmdline_len = 0;
 	char *proc_name;
 	vrrp_tracked_process_t *tpr;
-	element e;
 	const char *param_start;
 
 	cmd_buf_len = vrrp_data->vrrp_max_process_name_len + 2;
@@ -208,7 +279,7 @@ read_procs(list processes)
 		 * address space, and if the process is swapped out, then it will have to be
 		 * swapped in to read it. */
 		if (vrrp_data->vrrp_use_process_cmdline) {
-			snprintf(cmdline, sizeof(cmdline), "/proc/%.7s/cmdline", ent->d_name);
+			snprintf(cmdline, sizeof(cmdline), "/proc/%.*s/cmdline", PID_MAX_DIGITS, ent->d_name);
 
 			if ((fd = open(cmdline, O_RDONLY)) == -1)
 				continue;
@@ -222,7 +293,7 @@ read_procs(list processes)
 		}
 
 		if (vrrp_data->vrrp_use_process_comm) {
-			snprintf(cmdline, sizeof(cmdline), "/proc/%.7s/stat", ent->d_name);
+			snprintf(cmdline, sizeof(cmdline), "/proc/%.*s/stat", PID_MAX_DIGITS, ent->d_name);
 
 			if ((fd = open(cmdline, O_RDONLY)) == -1)
 				continue;
@@ -251,7 +322,7 @@ read_procs(list processes)
 		else
 			comm = NULL;	/* Avoid compiler warning */
 
-		LIST_FOREACH(processes, tpr, e) {
+		list_for_each_entry(tpr, processes, e_list) {
 			if (tpr->full_command)
 				proc_name = cmd_buf;
 			else if (comm)
@@ -281,8 +352,13 @@ read_procs(list processes)
 static void
 update_process_status(vrrp_tracked_process_t *tpr, bool now_up)
 {
-	if (now_up == tpr->have_quorum)
+	if (now_up == tpr->have_quorum) {
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "update process status no change for %s", tpr->pname);
+#endif
 		return;
+	}
 
 	tpr->have_quorum = now_up;
 
@@ -292,12 +368,11 @@ update_process_status(vrrp_tracked_process_t *tpr, bool now_up)
 static void
 remove_process_from_track(tracked_process_instance_t *tpi, vrrp_tracked_process_t *tpr)
 {
-	vrrp_tracked_process_t *proc;
-	element e;
+	ref_tracked_process_t *rtpr, *rtpr_tmp;
 
-	LIST_FOREACH(tpi->processes, proc, e) {
-		if (proc == tpr) {
-			free_list_element(tpi->processes, e);
+	list_for_each_entry_safe(rtpr, rtpr_tmp, &tpi->processes, e_list) {
+		if (rtpr->process == tpr) {
+			free_ref_tracked_process(rtpr);
 			if (tpr->num_cur_proc-- == tpr->quorum ||
 			    tpr->num_cur_proc == tpr->quorum_max) {
 				if (tpr->fork_timer_thread) {
@@ -314,7 +389,7 @@ remove_process_from_track(tracked_process_instance_t *tpi, vrrp_tracked_process_
 static void
 check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 {
-	char cmdline[22];	/* "/proc/xxxxxxx/cmdline" */
+	char cmdline[1 + 4 + 1 + PID_MAX_DIGITS + 1 + 7 + 1];	/* "/proc/xxxxxxx/{cmdline,comm}" */
 	int fd;
 	char *cmd_buf = NULL;
 	size_t cmd_buf_len;
@@ -324,10 +399,12 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 	char *proc_name;
 	const char *param_start;
 	vrrp_tracked_process_t *tpr;
-	element e;
 	bool had_process;
 	tracked_process_instance_t tp = { .pid = pid };
 	bool have_comm = !!comm;
+#ifdef _TRACK_PROCESS_DEBUG_
+	int sav_errno;
+#endif
 
 	/* Are we counting this process now? */
 	if (!tpi)
@@ -339,16 +416,28 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 	 * swapped in to read it. */
 	if (!have_comm) {
 		if (vrrp_data->vrrp_use_process_cmdline) {
-			snprintf(cmdline, sizeof(cmdline), "/proc/%hd/cmdline", pid);
+			snprintf(cmdline, sizeof(cmdline), "/proc/%d/cmdline", pid);
 
-			if ((fd = open(cmdline, O_RDONLY)) == -1)
+			if ((fd = open(cmdline, O_RDONLY)) == -1) {
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "check_process failed to open %s, errno %d", cmdline, errno);
+#endif
 				return;
+			}
 
 			cmd_buf_len = vrrp_data->vrrp_max_process_name_len + 3;
 			cmd_buf = MALLOC(cmd_buf_len);
 			cmdline_len = read(fd, cmd_buf, vrrp_data->vrrp_max_process_name_len + 2);
+#ifdef _TRACK_PROCESS_DEBUG_
+			sav_errno = errno;
+#endif
 			close(fd);
 			if (cmdline_len < 0) {
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "check_process failed to read %s, errno %d", cmdline, sav_errno);
+#endif
 				FREE(cmd_buf);
 				return;
 			}
@@ -356,17 +445,27 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 		}
 
 		if (vrrp_data->vrrp_use_process_comm) {
-			snprintf(cmdline, sizeof(cmdline), "/proc/%hd/comm", pid);
+			snprintf(cmdline, sizeof(cmdline), "/proc/%d/comm", pid);
 
-			fd = open(cmdline, O_RDONLY);
-			if (fd == -1) {
+			if ((fd = open(cmdline, O_RDONLY)) == -1) {
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "check_process failed to open %s, errno %d", cmdline, errno);
+#endif
 				FREE_PTR(cmd_buf);
 				return;
 			}
 
 			len = read(fd, comm_buf, sizeof(comm_buf) - 1);
+#ifdef _TRACK_PROCESS_DEBUG_
+			sav_errno = errno;
+#endif
 			close(fd);
 			if (len < 0) {
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "check_process failed to read %s, errno %d", cmdline, sav_errno);
+#endif
 				FREE_PTR(cmd_buf);
 				return;
 			}
@@ -377,7 +476,12 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 		}
 	}
 
-	LIST_FOREACH(vrrp_data->vrrp_track_processes, tpr, e) {
+#ifdef _TRACK_PROCESS_DEBUG_
+	if (do_track_process_debug_detail)
+		log_message(LOG_INFO, "check_process %s (cmdline %s)", comm, cmd_buf ? cmd_buf : "[none]");
+#endif
+
+	list_for_each_entry(tpr, &vrrp_data->vrrp_track_processes, e_list) {
 		if (tpr->full_command) {
 			/* If this is a PROC_EVENT_COMM, we aren't dealing with the command line */
 			if (have_comm)
@@ -395,6 +499,10 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 			if (tpr->param_match != PARAM_MATCH_NONE) {
 				param_start = proc_name + strlen(proc_name) + 1;
 				if (!check_params(tpr, param_start, proc_name + cmdline_len - param_start)) {
+#ifdef _TRACK_PROCESS_DEBUG_
+					if (do_track_process_debug_detail)
+						log_message(LOG_INFO, "check_process parameter mis-match");
+#endif
 					if (had_process)
 						remove_process_from_track(tpi, tpr);
 					continue;
@@ -403,9 +511,19 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 
 			tpi = add_process(pid, tpr, tpi);
 
+#ifdef _TRACK_PROCESS_DEBUG_
+			if (do_track_process_debug_detail)
+				log_message(LOG_INFO, "check_process adding process %d to %s", pid, tpr->pname);
+#endif
+
 			if (tpr->num_cur_proc == tpr->quorum ||
 			    tpr->num_cur_proc == tpr->quorum_max + 1) {
 				/* Cancel terminate timer thread if any, otherwise update status */
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "check_process %s num_proc now %u, quorum [%u:%u]", tpr->pname, tpr->num_cur_proc, tpr->quorum, tpr->quorum_max);
+#endif
+
 				if (tpr->terminate_timer_thread) {
 					thread_cancel(tpr->terminate_timer_thread);
 					tpr->terminate_timer_thread = NULL;
@@ -413,8 +531,13 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 				update_process_status(tpr, tpr->num_cur_proc == tpr->quorum);
 			}
 		}
-		else if (had_process && !have_comm)
+		else if (had_process && !have_comm) {
+#ifdef _TRACK_PROCESS_DEBUG_
+			if (do_track_process_debug_detail)
+				log_message(LOG_INFO, "check_process removing %d from %s", pid, tpr->pname);
+#endif
 			remove_process_from_track(tpi, tpr);
+		}
 	}
 
 	FREE_PTR(cmd_buf);
@@ -424,24 +547,24 @@ check_process(pid_t pid, char *comm, tracked_process_instance_t *tpi)
 
 	/* If we were monitoring the process, and are no longer,
 	 * remove it */
-	if (LIST_ISEMPTY(tpi->processes)) {
-		free_list(&tpi->processes);
-		rb_erase(&tpi->pid_tree, &process_tree);
-		FREE(tpi);
-	}
+	if (list_empty(&tpi->processes))
+		free_tracked_process_instance(tpi);
 }
 
-static int
+static void
 process_gained_quorum_timer_thread(thread_ref_t thread)
 {
 	vrrp_tracked_process_t *tpr = thread->arg;
+
+#ifdef _TRACK_PROCESS_DEBUG_
+	if (do_track_process_debug_detail)
+		log_message(LOG_INFO, "quorum gained timer for %s expired", tpr->pname);
+#endif
 
 	update_process_status(tpr,
 			      tpr->num_cur_proc >= tpr->quorum &&
 			      tpr->num_cur_proc <= tpr->quorum_max);
 	tpr->fork_timer_thread = NULL;
-
-	return 0;
 }
 
 static void
@@ -450,28 +573,48 @@ check_process_fork(pid_t parent_pid, pid_t child_pid)
 	tracked_process_instance_t tp = { .pid = parent_pid };
 	tracked_process_instance_t *tpi, *tpi_child;
 	vrrp_tracked_process_t *tpr;
-	element e;
+	ref_tracked_process_t *rtpr;
 
 	/* If we aren't interested in the parent, we aren't interested in the child */
-	if (!(tpi = rb_search(&process_tree, &tp, pid_tree, pid_compare)))
+	if (!(tpi = rb_search(&process_tree, &tp, pid_tree, pid_compare))) {
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "Ignoring fork for untracked pid %d", parent_pid);
+#endif
 		return;
+	}
 
-	PMALLOC(tpi_child);
-	tpi_child->pid = child_pid;
-	tpi_child->processes = alloc_list(NULL, NULL);
-	RB_CLEAR_NODE(&tpi_child->pid_tree);
-	rb_insert_sort(&process_tree, tpi_child, pid_tree, pid_compare);
+	tpi_child = alloc_tracked_process_instance(child_pid);
+#ifdef _TRACK_PROCESS_DEBUG_
+	if (do_track_process_debug_detail)
+		log_message(LOG_INFO, "Adding new child %d of parent %d", child_pid, parent_pid);
+#endif
 
-	LIST_FOREACH(tpi->processes, tpr, e)
-	{
-		list_add(tpi_child->processes, tpr);
+	list_for_each_entry(rtpr, &tpi->processes, e_list) {
+		tpr = rtpr->process;
+
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "Adding new child %d to track_process %s", child_pid, tpr->pname);
+#endif
+
+		/* Add a new reference */
+		alloc_ref_tracked_process(tpr, tpi_child);
 		if (++tpr->num_cur_proc == tpr->quorum ||
 		    tpr->num_cur_proc == tpr->quorum_max + 1) {
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "track_process %s num_proc now %u, quorum [%u:%u]", tpr->pname, tpr->num_cur_proc, tpr->quorum, tpr->quorum_max);
+#endif
 			if (tpr->terminate_timer_thread) {
 				thread_cancel(tpr->terminate_timer_thread);	// Cancel terminate timer
 				tpr->terminate_timer_thread = NULL;
 			} else if (tpr->fork_delay) {
 				tpr->fork_timer_thread = thread_add_timer(master, process_gained_quorum_timer_thread, tpr, tpr->fork_delay);
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "Adding timer %d for %s up", tpr->fork_delay, tpr->pname);
+#endif
 				continue;
 			}
 			update_process_status(tpr, tpr->num_cur_proc == tpr->quorum);
@@ -479,17 +622,20 @@ check_process_fork(pid_t parent_pid, pid_t child_pid)
 	}
 }
 
-static int
+static void
 process_lost_quorum_timer_thread(thread_ref_t thread)
 {
 	vrrp_tracked_process_t *tpr = thread->arg;
+
+#ifdef _TRACK_PROCESS_DEBUG_
+	if (do_track_process_debug_detail)
+		log_message(LOG_INFO, "quorum lost timer for %s expired", tpr->pname);
+#endif
 
 	update_process_status(tpr,
 			      tpr->num_cur_proc >= tpr->quorum &&
 			      tpr->num_cur_proc <= tpr->quorum_max);
 	tpr->terminate_timer_thread = NULL;
-
-	return 0;
 }
 
 static void
@@ -498,30 +644,42 @@ check_process_termination(pid_t pid)
 	tracked_process_instance_t tp = { .pid = pid };
 	tracked_process_instance_t *tpi;
 	vrrp_tracked_process_t *tpr;
-	element e;
+	ref_tracked_process_t *rtpr;
 
 	tpi = rb_search(&process_tree, &tp, pid_tree, pid_compare);
-
-	if (!tpi)
+	if (!tpi) {
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "Ignoring exit of untracked pid %d", pid);
+#endif
 		return;
+	}
 
-	LIST_FOREACH(tpi->processes, tpr, e) {
+	list_for_each_entry(rtpr, &tpi->processes, e_list) {
+		tpr = rtpr->process;
+
 		if (tpr->num_cur_proc-- == tpr->quorum ||
 		    tpr->num_cur_proc == tpr->quorum_max) {
+#ifdef _TRACK_PROCESS_DEBUG_
+			if (do_track_process_debug_detail)
+				log_message(LOG_INFO, "process exit %s num_proc now %u, quorum [%u:%u]", tpr->pname, tpr->num_cur_proc, tpr->quorum, tpr->quorum_max);
+#endif
 			if (tpr->fork_timer_thread) {
 				thread_cancel(tpr->fork_timer_thread);	// Cancel fork timer
 				tpr->fork_timer_thread = NULL;
 			} else if (tpr->terminate_delay) {
 				tpr->terminate_timer_thread = thread_add_timer(master, process_lost_quorum_timer_thread, tpr, tpr->terminate_delay);
+#ifdef _TRACK_PROCESS_DEBUG_
+				if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "Adding timer %d for %s termination", tpr->fork_delay, tpr->pname);
+#endif
 				continue;
 			}
 			update_process_status(tpr, tpr->num_cur_proc == tpr->quorum_max);
 		}
 	}
 
-	free_list(&tpi->processes);
-	rb_erase(&tpi->pid_tree, &process_tree);
-	FREE(tpi);
+	free_tracked_process_instance(tpi);
 }
 
 #if HAVE_DECL_PROC_EVENT_COMM
@@ -531,32 +689,50 @@ check_process_comm_change(pid_t pid, char *comm)
 	tracked_process_instance_t tp = { .pid = pid };
 	tracked_process_instance_t *tpi;
 	vrrp_tracked_process_t *tpr;
-	element e, next;
+	ref_tracked_process_t *rtpr, *rtpr_tmp;
 
 	tpi = rb_search(&process_tree, &tp, pid_tree, pid_compare);
+	if (!tpi) {
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "comm_change pid %d not found", pid);
+#endif
+		goto end;
+	}
 
-	if (tpi) {
-		/* The process was being monitored by its old name */
-		LIST_FOREACH_NEXT(tpi->processes, tpr, e, next) {
-			if (tpr->full_command)
-				continue;
+	/* The process was being monitored by its old name */
+	list_for_each_entry_safe(rtpr, rtpr_tmp, &tpi->processes, e_list) {
+		tpr = rtpr->process;
 
-			/* Check that the name really has changed */
-			if (!strcmp(comm, tpr->process_path))
-				return;
+		if (tpr->full_command)
+			continue;
 
-			list_remove(tpi->processes, e);
-			if (tpr->num_cur_proc-- == tpr->quorum ||
-			    tpr->num_cur_proc == tpr->quorum_max) {
-				if (tpr->fork_timer_thread) {
-					thread_cancel(tpr->fork_timer_thread);	// Cancel fork timer
-					tpr->fork_timer_thread = NULL;
-				}
-				update_process_status(tpr, tpr->num_cur_proc == tpr->quorum_max);
+		/* Check that the name really has changed */
+		if (!strcmp(comm, tpr->process_path))
+			return;
+
+#ifdef _TRACK_PROCESS_DEBUG_
+		if (do_track_process_debug_detail)
+			log_message(LOG_INFO, "comm change remove pid %d", pid);
+#endif
+		free_ref_tracked_process(rtpr);
+		if (tpr->num_cur_proc-- == tpr->quorum ||
+		    tpr->num_cur_proc == tpr->quorum_max) {
+#ifdef _TRACK_PROCESS_DEBUG_
+			if (do_track_process_debug_detail)
+				log_message(LOG_INFO, "comm change %s num_proc now %u, quorum [%u:%u]"
+						    , tpr->pname, tpr->num_cur_proc
+						    , tpr->quorum, tpr->quorum_max);
+#endif
+			if (tpr->fork_timer_thread) {
+				thread_cancel(tpr->fork_timer_thread);	// Cancel fork timer
+				tpr->fork_timer_thread = NULL;
 			}
+			update_process_status(tpr, tpr->num_cur_proc == tpr->quorum_max);
 		}
 	}
 
+  end:
 	/* Handle the new process name */
 	check_process(pid, comm, tpi);
 }
@@ -575,9 +751,11 @@ nl_connect(void)
 
 	nl_sd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_CONNECTOR);
 	if (nl_sd == -1) {
-		if (errno == EPROTONOSUPPORT)
-			log_message(LOG_INFO, "track_process not available - is CONFIG_PROC_EVENTS enabled in kernel config?");
-		else
+		if (errno == EPROTONOSUPPORT) {
+			if (__test_bit(LOG_DETAIL_BIT, &debug))
+				log_message(LOG_INFO, "track_process not available - is CONFIG_PROC_EVENTS enabled in kernel config?");
+			proc_events_not_supported = true;
+		} else
 			log_message(LOG_INFO, "Failed to open process monitoring socket - errno %d - %m", errno);
 		return -1;
 	}
@@ -648,8 +826,6 @@ reinitialise_track_processes(void)
 	socklen_t buf_size_len = sizeof(buf_size);
 	unsigned i;
 	vrrp_tracked_process_t *tpr;
-	element e;
-	tracked_process_instance_t *tpi, *next;
 
 	need_reinitialise = false;
 
@@ -661,21 +837,19 @@ reinitialise_track_processes(void)
 	buf_size *= 2;
 	set_rcv_buf(buf_size, global_data->process_monitor_rcv_bufs_force);
 
-	log_message(LOG_INFO, "Setting global_def process_monitor_rcv_bufs to %u - recommend updating configuration file", buf_size);
+	log_message(LOG_INFO, "Setting global_def process_monitor_rcv_bufs to %u"
+			      " - recommend updating configuration file"
+			    , buf_size);
 
 	/* Reset the sequence numbers */
 	for (i = 0; i < num_cpus; i++)
 		cpu_seq[i] = -1;
 
 	/* Remove the existing process tree */
-	rb_for_each_entry_safe(tpi, next, &process_tree, pid_tree) {
-		free_list(&tpi->processes);
-		rb_erase(&tpi->pid_tree, &process_tree);
-		FREE(tpi);
-	}
+	free_process_tree();
 
 	/* Save process counters, and clear any down timers */
-	LIST_FOREACH(vrrp_data->vrrp_track_processes, tpr, e) {
+	list_for_each_entry(tpr, &vrrp_data->vrrp_track_processes, e_list) {
 		tpr->sav_num_cur_proc = tpr->num_cur_proc;
 		tpr->num_cur_proc = 0;
 		if (tpr->fork_timer_thread) {
@@ -689,27 +863,39 @@ reinitialise_track_processes(void)
 	}
 
 	/* Re read processes */
-	read_procs(vrrp_data->vrrp_track_processes);
+	read_procs(&vrrp_data->vrrp_track_processes);
 
 	/* See if anything changed */
-	LIST_FOREACH(vrrp_data->vrrp_track_processes, tpr, e) {
+	list_for_each_entry(tpr, &vrrp_data->vrrp_track_processes, e_list) {
 		if (tpr->sav_num_cur_proc != tpr->num_cur_proc) {
 			if ((tpr->sav_num_cur_proc < tpr->quorum) == (tpr->num_cur_proc < tpr->quorum) &&
 			    (tpr->sav_num_cur_proc > tpr->quorum_max) == (tpr->num_cur_proc > tpr->quorum_max)) {
 				if (__test_bit(LOG_DETAIL_BIT, &debug))
-					log_message(LOG_INFO, "Process %s, number of current processes changed from %u to %u", tpr->pname, tpr->sav_num_cur_proc, tpr->num_cur_proc);
+					log_message(LOG_INFO, "Process %s, number of current processes changed"
+							      " from %u to %u"
+							    , tpr->pname
+							    , tpr->sav_num_cur_proc
+							    , tpr->num_cur_proc);
 				continue;
 			}
 			if (tpr->num_cur_proc >= tpr->quorum &&
 			    tpr->num_cur_proc <= tpr->quorum_max) {
 				if (__test_bit(LOG_DETAIL_BIT, &debug))
-					log_message(LOG_INFO, "Process %s, number of current processes changed from %u to %u, quorum up", tpr->pname, tpr->sav_num_cur_proc, tpr->num_cur_proc);
+					log_message(LOG_INFO, "Process %s, number of current processes changed"
+							      " from %u to %u, quorum up"
+							    , tpr->pname
+							    , tpr->sav_num_cur_proc
+							    , tpr->num_cur_proc);
 				if (tpr->fork_delay)
 					tpr->fork_timer_thread = thread_add_timer(master, process_gained_quorum_timer_thread, tpr, tpr->terminate_delay);
 				process_update_track_process_status(tpr, true);
 			} else {
 				if (__test_bit(LOG_DETAIL_BIT, &debug))
-					log_message(LOG_INFO, "Process %s, number of current processes changed from %u to %u, quorum down", tpr->pname, tpr->sav_num_cur_proc, tpr->num_cur_proc);
+					log_message(LOG_INFO, "Process %s, number of current processes changed"
+							      " from %u to %u, quorum down"
+							    , tpr->pname
+							    , tpr->sav_num_cur_proc
+							    , tpr->num_cur_proc);
 				if (tpr->terminate_delay)
 					tpr->terminate_timer_thread = thread_add_timer(master, process_lost_quorum_timer_thread, tpr, tpr->terminate_delay);
 				else
@@ -721,18 +907,17 @@ reinitialise_track_processes(void)
 	return;
 }
 
-static int
+static void
 process_lost_messages_timer_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	reinitialise_track_processes();
-
-	return 0;
 }
 
 /*
  * handle a single process event
  */
-static int handle_proc_ev(int nl_sd)
+static int
+handle_proc_ev(int nl_sd)
 {
 	struct nlmsghdr *nlmsghdr;
 	ssize_t len;
@@ -887,11 +1072,19 @@ static int handle_proc_ev(int nl_sd)
 				 * the parent process of the process doing the pthread_create(). */
 				if (proc_ev->event_data.fork.child_tgid == proc_ev->event_data.fork.child_pid)
 					check_process_fork(proc_ev->event_data.fork.parent_tgid, proc_ev->event_data.fork.child_tgid);
+#ifdef _TRACK_PROCESS_DEBUG_
+				else if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "Ignoring new thread %d for pid %d", proc_ev->event_data.fork.child_tgid, proc_ev->event_data.fork.child_pid);
+#endif
 				break;
 			case PROC_EVENT_EXEC:
 				/* We may be losing a process. Check if have pid, and check new cmdline */
 				if (proc_ev->event_data.exec.process_tgid == proc_ev->event_data.exec.process_pid)
 					check_process(proc_ev->event_data.exec.process_tgid, NULL, NULL);
+#ifdef _TRACK_PROCESS_DEBUG_
+				else if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "Ignoring exec of thread %d of pid %d", proc_ev->event_data.exec.process_tgid, proc_ev->event_data.exec.process_pid);
+#endif
 				break;
 #if HAVE_DECL_PROC_EVENT_COMM		/* Since Linux v3.2 */
 			/* NOTE: not having PROC_EVENT_COMM means that changes to /proc/PID/comm
@@ -899,12 +1092,20 @@ static int handle_proc_ev(int nl_sd)
 			case PROC_EVENT_COMM:
 				if (proc_ev->event_data.comm.process_tgid == proc_ev->event_data.comm.process_pid)
 					check_process_comm_change(proc_ev->event_data.comm.process_tgid, proc_ev->event_data.comm.comm);
+#ifdef _TRACK_PROCESS_DEBUG_
+				else if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "Ignoring COMM event of thread %d of pid %d", proc_ev->event_data.comm.process_tgid, proc_ev->event_data.comm.process_pid);
+#endif
 				break;
 #endif
 			case PROC_EVENT_EXIT:
 				/* We aren't interested in thread termination */
 				if (proc_ev->event_data.exit.process_tgid == proc_ev->event_data.exit.process_pid)
 					check_process_termination(proc_ev->event_data.exit.process_tgid);
+#ifdef _TRACK_PROCESS_DEBUG_
+				else if (do_track_process_debug_detail)
+					log_message(LOG_INFO, "Ignoring exit of thread %d of pid %d", proc_ev->event_data.exit.process_tgid, proc_ev->event_data.exit.process_pid);
+#endif
 				break;
 			default:
 				break;
@@ -917,16 +1118,12 @@ static int handle_proc_ev(int nl_sd)
 	return 0;
 }
 
-static int
+static void
 read_process_update(thread_ref_t thread)
 {
-	int rc = EXIT_SUCCESS;
-
-	rc = handle_proc_ev(thread->u.f.fd);
+	handle_proc_ev(thread->u.f.fd);
 
 	read_thread = thread_add_read(thread->master, read_process_update, NULL, thread->u.f.fd, TIMER_NEVER, false);
-
-	return rc;
 }
 
 bool
@@ -953,7 +1150,7 @@ close_track_processes(void)
 }
 
 bool
-init_track_processes(list processes)
+init_track_processes(list_head_t *processes)
 {
 	int rc = EXIT_SUCCESS;
 	unsigned i;
@@ -970,6 +1167,7 @@ init_track_processes(list processes)
 	}
 
 	if (!cpu_seq) {
+		/* should we consider only ONLINE CPU ? */
 		num = sysconf(_SC_NPROCESSORS_CONF);
 		if (num > 0) {
 			num_cpus = num;
@@ -978,7 +1176,9 @@ init_track_processes(list processes)
 				cpu_seq[i] = -1;
 		}
 		else
-			log_message(LOG_INFO, "sysconf returned %ld CPUs - ignoring and won't track process event sequence numbers", num);
+			log_message(LOG_INFO, "sysconf returned %ld CPUs"
+					      " - ignoring and won't track process event sequence numbers"
+					    , num);
 	}
 
 	read_procs(processes);
@@ -991,17 +1191,11 @@ init_track_processes(list processes)
 void
 reload_track_processes(void)
 {
-	tracked_process_instance_t *tpi, *next;
-
 	/* Remove the existing process tree */
-	rb_for_each_entry_safe(tpi, next, &process_tree, pid_tree) {
-		free_list(&tpi->processes);
-		rb_erase(&tpi->pid_tree, &process_tree);
-		FREE(tpi);
-	}
+	free_process_tree();
 
 	/* Re read processes */
-	read_procs(vrrp_data->vrrp_track_processes);
+	read_procs(&vrrp_data->vrrp_track_processes);
 
 	/* Add read thread */
 	read_thread = thread_add_read(master, read_process_update, NULL, nl_sock, TIMER_NEVER, false);
@@ -1013,8 +1207,6 @@ void
 end_process_monitor(void)
 {
 	vrrp_tracked_process_t *tpr;
-	element e;
-	tracked_process_instance_t *tpi, *next;
 
 	if (!cpu_seq)
 		return;
@@ -1034,7 +1226,7 @@ end_process_monitor(void)
 	FREE_PTR(cpu_seq);
 
 	/* Cancel any timer threads */
-	LIST_FOREACH(vrrp_data->vrrp_track_processes, tpr, e) {
+	list_for_each_entry(tpr, &vrrp_data->vrrp_track_processes, e_list) {
 		if (tpr->fork_timer_thread) {
 			thread_cancel(tpr->fork_timer_thread);
 			tpr->fork_timer_thread = NULL;
@@ -1045,11 +1237,8 @@ end_process_monitor(void)
 		}
 	}
 
-	rb_for_each_entry_safe(tpi, next, &process_tree, pid_tree) {
-		free_list(&tpi->processes);
-		rb_erase(&tpi->pid_tree, &process_tree);
-		FREE(tpi);
-	}
+	/* Remove the existing process tree */
+	free_process_tree();
 }
 
 #ifdef THREAD_DUMP

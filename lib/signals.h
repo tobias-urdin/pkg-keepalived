@@ -31,6 +31,11 @@
 
 #include "scheduler.h"
 
+#ifdef THREAD_DUMP
+#define	SIGTDUMP	(SIGRTMAX)
+#endif
+#define	SIGSTATS_CLEAR	(SIGRTMAX - 1)
+
 static inline int
 sigmask_func(int how, const sigset_t *set, sigset_t *oldset)
 {

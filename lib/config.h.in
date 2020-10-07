@@ -5,9 +5,6 @@
 #define _CONFIG_H
   
 
-/* Define to enable checksum debugging */
-#undef CHECKSUM_DIAGNOSTICS
-
 /* Define if need to check for EINTR errno */
 #undef CHECK_EINTR
 
@@ -17,10 +14,6 @@
 /* Define to 1 if need to call g_type_init() */
 #undef DBUS_NEED_G_TYPE_INIT
 
-/* Define to test for and log errno == EINTR when no asynchronous signal
-   handlers */
-#undef DEBUG_EINTR
-
 /* The default configuration file */
 #undef DEFAULT_CONFIG_FILE
 
@@ -29,6 +22,9 @@
 
 /* Define if enabling logging to files */
 #undef ENABLE_LOG_TO_FILE
+
+/* Define to 1 if linux/errqueue.h needs sys/time.h */
+#undef ERRQUEUE_NEEDS_SYS_TIME
 
 /* Defined here if not found in <net/ethernet.h>. */
 #undef ETHERTYPE_IPV6
@@ -206,6 +202,18 @@
    don't. */
 #undef HAVE_DECL_NFTA_DUP_MAX
 
+/* Define to 1 if you have the declaration of `nftnl_udata_buf_alloc', and to
+   0 if you don't. */
+#undef HAVE_DECL_NFTNL_UDATA_BUF_ALLOC
+
+/* Define to 1 if you have the declaration of `nftnl_udata_put_u32', and to 0
+   if you don't. */
+#undef HAVE_DECL_NFTNL_UDATA_PUT_U32
+
+/* Define to 1 if you have the declaration of `NFT_USERDATA_MAXLEN', and to 0
+   if you don't. */
+#undef HAVE_DECL_NFT_USERDATA_MAXLEN
+
 /* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
    */
 #undef HAVE_DECL_O_PATH
@@ -274,10 +282,6 @@
    if you don't. */
 #undef HAVE_DECL_SCHED_RESET_ON_FORK
 
-/* Define to 1 if you have the declaration of `SCHED_RR', and to 0 if you
-   don't. */
-#undef HAVE_DECL_SCHED_RR
-
 /* Define to 1 if you have the declaration of `SOCK_CLOEXEC', and to 0 if you
    don't. */
 #undef HAVE_DECL_SOCK_CLOEXEC
@@ -344,9 +348,6 @@
 /* Define to 1 if you have the <libiptc/libxtc.h> header file. */
 #undef HAVE_LIBIPTC_LIBXTC_H
 
-/* Define to 1 if you have the <libnftnl/udata.h> header file. */
-#undef HAVE_LIBNFTNL_UDATA_H
-
 /* Define to 1 if you have the `ssl' library (-lssl). */
 #undef HAVE_LIBSSL
 
@@ -398,8 +399,7 @@
 /* Define to 1 if you have the <linux/types.h> header file. */
 #undef HAVE_LINUX_TYPES_H
 
-/* Define to 1 if your system has a GNU libc compatible `malloc' function, and
-   to 0 otherwise. */
+/* Define to 1 if you have the `malloc' function. */
 #undef HAVE_MALLOC
 
 /* Define to 1 if you have the `memmove' function. */
@@ -439,11 +439,11 @@
 /* Define to 1 if you have the <net-snmp/agent/util_funcs.h> header file. */
 #undef HAVE_NET_SNMP_AGENT_UTIL_FUNCS_H
 
-/* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS defined */
-#undef HAVE_NFTNL_EXPR_LOOKUP_FLAGS
+/* Define to 1 if NFTNL_EXPR_LOOKUP_FLAGS and NFT_LOOKUP_F_INV defined */
+#undef HAVE_NFTNL_EXPR_LOOKUP_FLAG_INV
 
-/* Define to 1 if nftnl_udata_put_u32 declared */
-#undef HAVE_NFTNL_UDATA_PUT_U32
+/* Define to 1 if have nftnl udata support */
+#undef HAVE_NFTNL_UDATA
 
 /* Define to 1 if you have the <openssl/err.h> header file. */
 #undef HAVE_OPENSSL_ERR_H
@@ -466,8 +466,7 @@
 /* Define to 1 if you have the `pipe2' function. */
 #undef HAVE_PIPE2
 
-/* Define to 1 if your system has a GNU libc compatible `realloc' function,
-   and to 0 otherwise. */
+/* Define to 1 if you have the `realloc' function. */
 #undef HAVE_REALLOC
 
 /* Define to 1 if you have the `select' function. */
@@ -553,6 +552,9 @@
 
 /* Define to 1 if you have the <sys/types.h> header file. */
 #undef HAVE_SYS_TYPES_H
+
+/* Define to 1 if have timegm() */
+#undef HAVE_TIMEGM
 
 /* Define to 1 if you have the `TLS_method' function. */
 #undef HAVE_TLS_METHOD
@@ -657,14 +659,17 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
-/* Parent directory of /run */
-#undef PID_DIR_ROOT
+/* Define to zu if msghdr.msg_controllen is size_t, else u */
+#undef PRI_MSG_CONTROLLEN
 
 /* Define printf format specifier for rlim_t */
 #undef PRI_rlim_t
 
 /* Define to 1 if <linux/rtnetlink.h> needs <sys/socket.h> */
 #undef RTNETLINK_H_NEEDS_SYS_SOCKET_H
+
+/* Parent directory of /run */
+#undef RUN_DIR_ROOT
 
 /* Dummy definition if not defined in system headers */
 #undef SCHED_RESET_ON_FORK
@@ -688,11 +693,18 @@
 /* Define if <linux/netfilter/x_tables.h> doesnt define it */
 #undef XT_EXTENSION_MAXNAMELEN
 
-/* Define to 1 to build with debugging support */
-#undef _DEBUG_
+/* Define to enable checker debugging */
+#undef _CHECKER_DEBUG_
+
+/* Define to enable checksum debugging */
+#undef _CHECKSUM_DEBUG_
 
 /* Define to enable keyword dumping */
 #undef _DUMP_KEYWORDS_
+
+/* Define to test for and log errno == EINTR when no asynchronous signal
+   handlers */
+#undef _EINTR_DEBUG_
 
 /* Define to 1 to enable asserts */
 #undef _ENABLE_ASSERT_
@@ -705,6 +717,9 @@
 
 /* Consider ${with_fixed_if_type} interfaces to be unchangeable */
 #undef _FIXED_IF_TYPE_
+
+/* Define to enable genhash debugging */
+#undef _GENHASH_DEBUG_
 
 /* Define to 1 if can have _Pragma GCC diagnostic push/pop */
 #undef _HAVE_DIAGNOSTIC_PUSH_POP_PRAGMAS_
@@ -733,9 +748,6 @@
 /* Define to 1 if have ipset library */
 #undef _HAVE_LIBIPSET_
 
-/* Define to 1 if have iptables libraries */
-#undef _HAVE_LIBIPTC_
-
 /* Define to 1 if have libiptc/libiptc.h linux/if.h and net/if.h namespace
    collision */
 #undef _HAVE_LIBIPTC_LINUX_NET_IF_H_COLLISION_
@@ -748,6 +760,10 @@
 
 /* Define to 1 if using libnl-3 */
 #undef _HAVE_LIBNL3_
+
+/* Define to 1 if have linux/if_ether.h then netinet/in.h then linux/in.h
+   namespace collision */
+#undef _HAVE_LINUX_IF_ETHER_H_COLLISION_
 
 /* Define to 1 if have linux/if_ether.h then netinet/if_ether.h namespace
    collision */
@@ -762,9 +778,6 @@
 /* Define to 1 if _Pragma("GCC diagnostic warning \"-Wstrict-overflow=1\"")
    supported */
 #undef _HAVE_PRAGMA_WARN_STRICT_OVERFLOW_1_
-
-/* Define to 1 if have SCHED_RR */
-#undef _HAVE_SCHED_RT_
 
 /* Define to 1 if have SSL_set_tlsext_host_name() */
 #undef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
@@ -793,6 +806,9 @@
 /* Define to 1 to log malloc/free checks to syslog */
 #undef _MEM_CHECK_LOG_
 
+/* Define to enable memory alloc/free error debugging */
+#undef _MEM_ERR_DEBUG_
+
 /* Define to 1 to build with netlink command timers support */
 #undef _NETLINK_TIMERS_
 
@@ -802,14 +818,23 @@
 /* Define to 1 if unaligned memory access not supported */
 #undef _NO_UNALIGNED_ACCESS_
 
+/* Define to 1 to build with debugging support */
+#undef _ONE_PROCESS_DEBUG_
+
 /* Define to enable parser debugging */
 #undef _PARSER_DEBUG_
 
 /* Define to 1 to build with regex debugging support */
 #undef _REGEX_DEBUG_
 
+/* Define to enable script debugging support */
+#undef _SCRIPT_DEBUG_
+
 /* Define to 1 to build with smtp-alert debugging support */
 #undef _SMTP_ALERT_DEBUG_
+
+/* Define to enable SMTP connection debugging */
+#undef _SMTP_CONNECT_DEBUG_
 
 /* Define to 1 to have keepalived send RFC6527 SNMP responses for VRRPv2
    instances */
@@ -841,9 +866,6 @@
    <pthread.h>, or <semaphore.h> is not used. If the typedef were allowed, the
    #define below would cause a syntax error. */
 #undef _UINT8_T
-
-/* Define to 1 if using iptables command enabled */
-#undef _USE_IPTABLES_CMD_
 
 /* Define to 1 to build with vrrp fd debugging support */
 #undef _VRRP_FD_DEBUG_
@@ -952,14 +974,8 @@
    such a type exists and the standard includes do not define it. */
 #undef int64_t
 
-/* Define to rpl_malloc if the replacement function should be used. */
-#undef malloc
-
 /* Define to `int' if <sys/types.h> does not define. */
 #undef pid_t
-
-/* Define to rpl_realloc if the replacement function should be used. */
-#undef realloc
 
 /* Define to `unsigned int' if <sys/types.h> does not define. */
 #undef size_t
