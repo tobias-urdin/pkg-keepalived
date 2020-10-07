@@ -42,6 +42,7 @@
 #include "bitops.h"
 #include "logger.h"
 #include "scheduler.h"
+#include "process.h"
 
 #ifdef _MEM_CHECK_
 #include "timer.h"
@@ -55,6 +56,10 @@ static size_t max_mem_allocated;	/* Maximum memory used in Bytes */
 static const char *terminate_banner;	/* banner string for report file */
 
 static bool skip_mem_check_final;
+
+#ifdef _MEM_ERR_DEBUG_
+bool do_mem_err_debug;
+#endif
 #endif
 
 static void * __attribute__ ((malloc))
@@ -159,12 +164,12 @@ typedef struct {
 } MEMCHECK;
 
 /* Last free pointers */
-static LH_LIST_HEAD(free_list);
+static LIST_HEAD_INITIALIZE(free_list);
 static unsigned free_list_size;
 
 /* alloc_list entries used for 1000 VRRP instance each with VMAC interfaces is 33589 */
 static rb_root_t alloc_list = RB_ROOT;
-static LH_LIST_HEAD(bad_list);
+static LIST_HEAD_INITIALIZE(bad_list);
 
 static unsigned number_alloc_list;	/* number of alloc_list allocation entries */
 static unsigned max_alloc_list;
@@ -218,7 +223,7 @@ get_free_alloc_entry(void)
 		entry = malloc(sizeof *entry);
 	else {
 		entry = list_first_entry(&free_list, MEMCHECK, l);
-		list_head_del(&entry->l);
+		list_del_init(&entry->l);
 		free_list_size--;
 	}
 
@@ -332,7 +337,9 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 				"realloc", "ERROR", "NULL",
 				size, file, line, function, size ? " *** converted to malloc" : "");
 
+#ifdef _MEM_ERR_DEBUG_
 		__set_bit(MEM_ERR_DETECT_BIT, &debug);
+#endif
 
 		list_add_tail(&entry->l, &bad_list);
 
@@ -362,7 +369,9 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 				"realloc", "ERROR",
 				buffer, size, file, line, function);
 
+#ifdef _MEM_ERR_DEBUG_
 		__set_bit(MEM_ERR_DETECT_BIT, &debug);
+#endif
 
 		list_for_each_entry_reverse(le, &free_list, l) {
 			if (le->ptr == buffer &&
@@ -407,7 +416,9 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 		dump_buffer((char *) &check,
 			    sizeof(check), log_op, TIME_STR_LEN);
 
+#ifdef _MEM_ERR_DEBUG_
 		__set_bit(MEM_ERR_DETECT_BIT, &debug);
+#endif
 	}
 
 	mem_allocated -= entry->size;
@@ -659,7 +670,7 @@ mem_log_init(const char* prog_name, const char *banner)
 	if (log_op)
 		fclose(log_op);
 
-	log_name_len = 5 + strlen(prog_name) + 5 + 7 + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
+	log_name_len = 5 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
 	log_name = malloc(log_name_len);
 	if (!log_name) {
 		log_message(LOG_INFO, "Unable to malloc log file name");
@@ -708,5 +719,16 @@ update_mem_check_log_perms(mode_t umask_bits)
 {
 	if (log_op)
 		fchmod(fileno(log_op), (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH) & ~umask_bits);
+}
+
+void
+log_mem_check_message(const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vfprintf(log_op, format, args);
+	va_end(args);
+	fprintf(log_op, "\n");
 }
 #endif

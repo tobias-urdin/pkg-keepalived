@@ -45,8 +45,8 @@
 #include "scheduler.h"
 #endif
 
-static int misc_check_thread(thread_ref_t);
-static int misc_check_child_thread(thread_ref_t);
+static void misc_check_thread(thread_ref_t);
+static void misc_check_child_thread(thread_ref_t);
 
 static bool script_user_set;
 static misc_checker_t *new_misck_checker;
@@ -83,7 +83,7 @@ dump_misc_check(FILE *fp, const checker_t *checker)
 }
 
 static bool
-misc_check_compare(const checker_t *old_c, const checker_t *new_c)
+misc_check_compare(const checker_t *old_c, checker_t *new_c)
 {
 	const misc_checker_t *old = old_c->data;
 	const misc_checker_t *new = new_c->data;
@@ -219,23 +219,16 @@ install_misc_check_keyword(void)
 }
 
 /* Check that the scripts are secure */
-int
+unsigned
 check_misc_script_security(magic_t magic)
 {
-	element e, next;
-	checker_t *checker;
+	checker_t *checker, *checker_tmp;
 	misc_checker_t *misc_script;
-	int script_flags = 0;
-	int flags;
+	unsigned script_flags = 0;
+	unsigned flags;
 	bool insecure;
 
-	if (LIST_ISEMPTY(checkers_queue))
-		return 0;
-
-	for (e = LIST_HEAD(checkers_queue); e; e = next) {
-		next = e->next;
-		checker = ELEMENT_DATA(e);
-
+	list_for_each_entry_safe(checker, checker_tmp, &checkers_queue, e_list) {
 		if (checker->launch != misc_check_thread)
 			continue;
 
@@ -258,14 +251,14 @@ check_misc_script_security(magic_t magic)
 
 		if (insecure) {
 			/* Remove the script */
-			free_list_element(checkers_queue, e);
+			free_checker(checker);
 		}
 	}
 
 	return script_flags;
 }
 
-static int
+static void
 misc_check_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
@@ -282,7 +275,7 @@ misc_check_thread(thread_ref_t thread)
 		/* Register next timer checker */
 		thread_add_timer(thread->master, misc_check_thread, checker,
 				 checker->delay_loop);
-		return 0;
+		return;
 	}
 
 	/* Execute the script in a child process. Parent returns, child doesn't */
@@ -293,11 +286,9 @@ misc_check_thread(thread_ref_t thread)
 		misck_checker->last_ran = time_now;
 		misck_checker->state = SCRIPT_STATE_RUNNING;
 	}
-
-	return ret;
 }
 
-static int
+static void
 misc_check_child_thread(thread_ref_t thread)
 {
 	int wait_status;
@@ -337,7 +328,7 @@ misc_check_child_thread(thread_ref_t thread)
 		if (timeout) {
 			/* If kill returns an error, we can't kill the process since either the process has terminated,
 			 * or we don't have permission. If we can't kill it, there is no point trying again. */
-			if (!kill(-pid, sig_num)) {
+			if (kill(-pid, sig_num)) {
 				if (errno == ESRCH) {
 					/* The process does not exist, and we should
 					 * have reaped its exit status, otherwise it
@@ -358,7 +349,7 @@ misc_check_child_thread(thread_ref_t thread)
 		if (timeout)
 			thread_add_child(thread->master, misc_check_child_thread, checker, pid, timeout * TIMER_HZ);
 
-		return 0;
+		return;
 	}
 
 	wait_status = THREAD_CHILD_STATUS(thread);
@@ -401,7 +392,7 @@ misc_check_child_thread(thread_ref_t thread)
 				if (global_data->checker_log_all_failures || checker->log_all_failures)
 					message_only = true;
 				else
-					script_exit_type = NULL;
+					script_exit_type = NULL; /* this disables all message handling */
 			} else {
 				checker->retry_it = 0;
 				misck_checker->last_exit_code = status;
@@ -435,18 +426,31 @@ misc_check_child_thread(thread_ref_t thread)
 				if (global_data->checker_log_all_failures || checker->log_all_failures)
 					message_only = true;
 				else
-					script_exit_type = NULL;
+					script_exit_type = NULL; /* this disables all message handling */
 			} else
 				checker->retry_it = 0;
 		}
 	}
 
-	if (script_exit_type) {
+	if (script_exit_type) { /* not the case if retry check will follow and log_all_failures unset */
 		char message[40];
 
-		if (!script_success && checker->retry)
-			snprintf(message, sizeof(message), " after %u retries", checker->retry);
-		else
+		if (!script_success) {
+			/*
+			 * retry is always the fixed value of config parameter retry
+			 * If retry > 0 then on the regulary scheduled check fail retry_it is 1, on the first retry check fail retry_it is 2 and so on
+			 * but on the last retry check fail, retry_it is 0
+			 */
+			if (checker->retry) {
+				if (checker->retry_it == 1) /* failed regulary scheduled check */
+					snprintf(message, sizeof(message), ", will do %u %s", checker->retry, checker->retry == 1 ? "retry" : "retries");
+				else if (checker->retry_it > 1) /* failed retry check, but not the last */
+					snprintf(message, sizeof(message), " on retry %u/%u", checker->retry_it - 1, checker->retry);
+				else /* failed last retry check */
+					snprintf(message, sizeof(message), " after %u %s", checker->retry, checker->retry == 1 ? "retry" : "retries" );
+			} else /* retry 0 */
+				snprintf(message, sizeof(message), " with retry disabled");
+		} else
 			message[0] = '\0';
 
 		if (reason)
@@ -490,8 +494,6 @@ misc_check_child_thread(thread_ref_t thread)
 	misck_checker->state = SCRIPT_STATE_IDLE;
 
 	checker->has_run = true;
-
-	return 0;
 }
 
 #ifdef THREAD_DUMP

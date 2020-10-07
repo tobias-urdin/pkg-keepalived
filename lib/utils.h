@@ -36,16 +36,6 @@
 #include <string.h>
 
 #include "vector.h"
-#if defined _DEBUG_ || defined DEBUG_EINTR
-#include "logger.h"
-#endif
-
-/* Global debugging logging facilities */
-#ifdef _DEBUG_
-#define DBG(fmt, msg...) log_message(LOG_DEBUG, fmt, ## msg)
-#else
-#define DBG(fmt, msg...)
-#endif
 
 #define STR(x)  #x
 
@@ -63,10 +53,14 @@ typedef enum {
 } perf_t;
 #endif
 
+#ifdef _EINTR_DEBUG_
+extern bool do_eintr_debug;
+#endif
+
 /* Some library functions that take pointer parameters should have them
  * specified as const pointers, but don't. We need to cast away the constness,
  * but also want to avoid compiler warnings for doing so. The following "trick"
- * achieves that. */ 
+ * achieves that. */
 #define no_const(type, var_cp) \
 ({ union { type *p; const type *cp; } ps = { .cp = var_cp }; \
  ps.p;})
@@ -83,7 +77,10 @@ typedef enum {
 static inline bool
 check_EINTR(int xx)
 {
-	if ((xx) == EINTR) {
+	if (!do_eintr_debug)
+		return (xx == EINTR);
+
+	if (xx == EINTR) {
 		log_message(LOG_INFO, "%s:%s(%d) - EINTR returned", (__FILE__), (__func__), (__LINE__));
 		return true;
 	}
@@ -213,8 +210,9 @@ static inline uint16_t csum_incremental_update16(const uint16_t old_csum, const 
 	return ~acc & 0xffff;
 }
 
+/* The following definition produces some warnings: (dst[0] = '\0', strncat(dst, src, sizeof(dst) - 1)) */
 #define strcpy_safe(dst, src) \
-	(dst[0] = '\0', strncat(dst, src, sizeof(dst) - 1))
+	do { strncpy(dst, src, sizeof(dst) - 1); dst[sizeof(dst) - 1] = '\0'; } while (0)
 
 /* global vars exported */
 extern unsigned long debug;
@@ -225,7 +223,7 @@ extern perf_t perf_run;
 
 /* Prototypes defs */
 extern void dump_buffer(const char *, size_t, FILE *, int);
-#ifdef CHECKSUM_DIAGNOSTICS
+#ifdef _CHECKSUM_DEBUG_
 extern void log_buffer(const char *, const void *, size_t);
 #endif
 #ifdef _WITH_STACKTRACE_
@@ -261,15 +259,12 @@ extern int integer_to_string(const int, char *, size_t);
 extern FILE *fopen_safe(const char *, const char *);
 extern void set_std_fd(bool);
 extern void close_std_fd(void);
-#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
-extern int fork_exec(const char * const []);
-#endif
 #if defined _WITH_VRRP_ || defined _WITH_BFD_
 extern int open_pipe(int [2]);
 #endif
 extern int memcmp_constant_time(const void *, const void *, size_t);
 
-#if defined _WITH_LVS_ || defined _LIBIPSET_DYNAMIC_
+#if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
 extern bool keepalived_modprobe(const char *);
 #endif
 

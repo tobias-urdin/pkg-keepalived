@@ -45,18 +45,21 @@
 #ifdef _SMTP_ALERT_DEBUG_
 bool do_smtp_alert_debug;
 #endif
+#ifdef _SMTP_CONNECT_DEBUG_
+bool do_smtp_connect_debug;
+#endif
 
 /* SMTP FSM definition */
-static int connection_error(thread_ref_t);
-static int connection_in_progress(thread_ref_t);
-static int connection_timeout(thread_ref_t);
-static int connection_success(thread_ref_t);
-static int helo_cmd(thread_ref_t);
-static int mail_cmd(thread_ref_t);
-static int rcpt_cmd(thread_ref_t);
-static int data_cmd(thread_ref_t);
-static int body_cmd(thread_ref_t);
-static int quit_cmd(thread_ref_t);
+static void connection_error(thread_ref_t);
+static void connection_in_progress(thread_ref_t);
+static void connection_timeout(thread_ref_t);
+static void connection_success(thread_ref_t);
+static void helo_cmd(thread_ref_t);
+static void mail_cmd(thread_ref_t);
+static void rcpt_cmd(thread_ref_t);
+static void data_cmd(thread_ref_t);
+static void body_cmd(thread_ref_t);
+static void quit_cmd(thread_ref_t);
 
 static int connection_code(thread_ref_t , int);
 static int helo_code(thread_ref_t , int);
@@ -66,11 +69,11 @@ static int data_code(thread_ref_t , int);
 static int body_code(thread_ref_t , int);
 static int quit_code(thread_ref_t , int);
 
-static int smtp_read_thread(thread_ref_t);
-static int smtp_send_thread(thread_ref_t);
+static void smtp_read_thread(thread_ref_t);
+static void smtp_send_thread(thread_ref_t);
 
 struct {
-	int (*send) (thread_ref_t);
+	void (*send) (thread_ref_t);
 	int (*read) (thread_ref_t, int);
 } SMTP_FSM[SMTP_MAX_FSM_STATE] = {
 /*       Code			  Stream Write Handlers		Stream Read handlers *
@@ -99,7 +102,7 @@ free_smtp_all(smtp_t * smtp)
 }
 
 /* layer4 connection handlers */
-static int
+static void
 connection_error(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -107,9 +110,8 @@ connection_error(thread_ref_t thread)
 	log_message(LOG_INFO, "SMTP connection ERROR to %s."
 			    , FMT_SMTP_HOST());
 	free_smtp_all(smtp);
-	return 0;
 }
-static int
+static void
 connection_timeout(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -117,15 +119,16 @@ connection_timeout(thread_ref_t thread)
 	log_message(LOG_INFO, "Timeout connecting SMTP server %s."
 			    , FMT_SMTP_HOST());
 	free_smtp_all(smtp);
-	return 0;
 }
-static int
+static void
 connection_in_progress(thread_ref_t thread)
 {
 	int status;
 
-	DBG("SMTP connection to %s now IN_PROGRESS.",
-	    FMT_SMTP_HOST());
+#ifdef _SMTP_CONNECT_DEBUG_
+	if (do_smtp_connect_debug)
+		log_message(LOG_DEBUG, "SMTP connection to %s now IN_PROGRESS.", FMT_SMTP_HOST());
+#endif
 
 	/*
 	 * Here we use the propriety of a union structure,
@@ -135,10 +138,8 @@ connection_in_progress(thread_ref_t thread)
 
 	if (status != connect_in_progress)
 		SMTP_FSM_SEND(status, thread);
-
-	return 0;
 }
-static int
+static void
 connection_success(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -149,11 +150,10 @@ connection_success(thread_ref_t thread)
 	smtp->stage = connect_success;
 	thread_add_read(thread->master, smtp_read_thread, smtp,
 			smtp->fd, global_data->smtp_connection_to, true);
-	return 0;
 }
 
 /* SMTP protocol handlers */
-static int
+static void
 smtp_read_thread(thread_ref_t thread)
 {
 	smtp_t *smtp;
@@ -168,7 +168,7 @@ smtp_read_thread(thread_ref_t thread)
 		log_message(LOG_INFO, "Timeout reading data to remote SMTP server %s."
 				    , FMT_SMTP_HOST());
 		SMTP_FSM_READ(QUIT, thread, 0);
-		return -1;
+		return;
 	}
 
 	buffer = smtp->buffer;
@@ -180,20 +180,20 @@ smtp_read_thread(thread_ref_t thread)
 		if (check_EAGAIN(errno)) {
 			thread_add_read(thread->master, smtp_read_thread, smtp,
 					thread->u.f.fd, global_data->smtp_connection_to, true);
-			return 0;
+			return;
 		}
 
 		log_message(LOG_INFO, "Error reading data from remote SMTP server %s."
 				    , FMT_SMTP_HOST());
 		SMTP_FSM_READ(QUIT, thread, 0);
-		return 0;
+		return;
 	}
 
 	if (rcv_buffer_size == 0) {
 		log_message(LOG_INFO, "Remote SMTP server %s has closed the connection."
 				    , FMT_SMTP_HOST());
 		SMTP_FSM_READ(QUIT, thread, 0);
-		return 0;
+		return;
 	}
 
 	/* received data overflow buffer size ? */
@@ -202,7 +202,7 @@ smtp_read_thread(thread_ref_t thread)
 				      " overflow our get read buffer length."
 				    , FMT_SMTP_HOST());
 		SMTP_FSM_READ(QUIT, thread, 0);
-		return 0;
+		return;
 	}
 
 	smtp->buflen += (size_t)rcv_buffer_size;
@@ -223,7 +223,7 @@ smtp_read_thread(thread_ref_t thread)
 			thread_add_read(thread->master, smtp_read_thread,
 					smtp, thread->u.f.fd,
 					global_data->smtp_connection_to, true);
-			return 0;
+			return;
 		}
 
 		if (reply[3] == '-') {
@@ -245,7 +245,7 @@ smtp_read_thread(thread_ref_t thread)
 	if (status == -1) {
 		thread_add_read(thread->master, smtp_read_thread, smtp,
 				thread->u.f.fd, global_data->smtp_connection_to, true);
-		return 0;
+		return;
 	}
 
 	SMTP_FSM_READ(smtp->stage, thread, status);
@@ -260,10 +260,10 @@ smtp_read_thread(thread_ref_t thread)
 		SMTP_FSM_READ(QUIT, thread, 0);
 	}
 
-	return 0;
+	return;
 }
 
-static int
+static void
 smtp_send_thread(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -272,7 +272,7 @@ smtp_send_thread(thread_ref_t thread)
 		log_message(LOG_INFO, "Timeout sending data to remote SMTP server %s."
 				    , FMT_SMTP_HOST());
 		SMTP_FSM_READ(QUIT, thread, 0);
-		return 0;
+		return;
 	}
 
 	SMTP_FSM_SEND(smtp->stage, thread);
@@ -280,7 +280,7 @@ smtp_send_thread(thread_ref_t thread)
 	/* Handle END command */
 	if (smtp->stage == END) {
 		SMTP_FSM_READ(QUIT, thread, 0);
-		return 0;
+		return;
 	}
 
 	/* Registering next smtp command processing thread */
@@ -294,7 +294,7 @@ smtp_send_thread(thread_ref_t thread)
 		SMTP_FSM_READ(QUIT, thread, 0);
 	}
 
-	return 0;
+	return;
 }
 
 static int
@@ -316,7 +316,7 @@ connection_code(thread_ref_t thread, int status)
 }
 
 /* HELO command processing */
-static int
+static void
 helo_cmd(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -327,8 +327,6 @@ helo_cmd(thread_ref_t thread)
 	if (send(thread->u.f.fd, buffer, strlen(buffer), 0) == -1)
 		smtp->stage = ERROR;
 	FREE(buffer);
-
-	return 0;
 }
 static int
 helo_code(thread_ref_t thread, int status)
@@ -349,7 +347,7 @@ helo_code(thread_ref_t thread, int status)
 }
 
 /* MAIL command processing */
-static int
+static void
 mail_cmd(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -360,8 +358,6 @@ mail_cmd(thread_ref_t thread)
 	if (send(thread->u.f.fd, buffer, strlen(buffer), 0) == -1)
 		smtp->stage = ERROR;
 	FREE(buffer);
-
-	return 0;
 }
 static int
 mail_code(thread_ref_t thread, int status)
@@ -382,26 +378,26 @@ mail_code(thread_ref_t thread, int status)
 }
 
 /* RCPT command processing */
-static int
+static void
 rcpt_cmd(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
+	email_t *email = smtp->next_email_element;
 	char *buffer;
-	char *fetched_email;
 
 	buffer = (char *) MALLOC(SMTP_BUFFER_MAX);
 	/* We send RCPT TO command multiple time to add all our email receivers.
 	 * --rfc821.3.1
 	 */
-	fetched_email = ELEMENT_DATA(smtp->next_email_element);
-	ELEMENT_NEXT(smtp->next_email_element);
+	if (list_is_last(&smtp->next_email_element->e_list, &global_data->email))
+		smtp->next_email_element = NULL;
+	else
+		smtp->next_email_element = list_entry(email->e_list.next, email_t, e_list);
 
-	snprintf(buffer, SMTP_BUFFER_MAX, SMTP_RCPT_CMD, fetched_email);
+	snprintf(buffer, SMTP_BUFFER_MAX, SMTP_RCPT_CMD, email->addr);
 	if (send(thread->u.f.fd, buffer, strlen(buffer), 0) == -1)
 		smtp->stage = ERROR;
 	FREE(buffer);
-
-	return 0;
 }
 static int
 rcpt_code(thread_ref_t thread, int status)
@@ -423,14 +419,13 @@ rcpt_code(thread_ref_t thread, int status)
 }
 
 /* DATA command processing */
-static int
+static void
 data_cmd(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
 
 	if (send(thread->u.f.fd, SMTP_DATA_CMD, strlen(SMTP_DATA_CMD), 0) == -1)
 		smtp->stage = ERROR;
-	return 0;
 }
 static int
 data_code(thread_ref_t thread, int status)
@@ -454,7 +449,7 @@ data_code(thread_ref_t thread, int status)
  * Do we need to use mutli-thread for multi-part body
  * handling ? Don t really think :)
  */
-static int
+static void
 body_cmd(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -488,7 +483,6 @@ body_cmd(thread_ref_t thread)
 		smtp->stage = ERROR;
 
 	FREE(buffer);
-	return 0;
 }
 static int
 body_code(thread_ref_t thread, int status)
@@ -510,7 +504,7 @@ body_code(thread_ref_t thread, int status)
 }
 
 /* QUIT command processing */
-static int
+static void
 quit_cmd(thread_ref_t thread)
 {
 	smtp_t *smtp = THREAD_ARG(thread);
@@ -519,7 +513,6 @@ quit_cmd(thread_ref_t thread)
 		smtp->stage = ERROR;
 	else
 		smtp->stage++;
-	return 0;
 }
 
 static int
@@ -539,10 +532,13 @@ smtp_connect(smtp_t *smtp)
 {
 	enum connect_result status;
 
-	smtp->next_email_element = LIST_HEAD(global_data->email);
+	smtp->next_email_element = list_first_entry(&global_data->email, email_t, e_list);
 
 	if ((smtp->fd = socket(global_data->smtp_server.ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP)) == -1) {
-		DBG("SMTP connect fail to create socket.");
+#ifdef _SMTP_CONNECT_DEBUG_
+		if (do_smtp_connect_debug)
+			log_message(LOG_DEBUG, "SMTP connect fail to create socket.");
+#endif
 		free_smtp_all(smtp);
 		return;
 	}
@@ -573,18 +569,20 @@ smtp_log_to_file(smtp_t *smtp)
 	char time_buf[25];
 	int time_buf_len;
 
-	time(&now);
-	localtime_r(&now, &tm);
-	time_buf_len = strftime(time_buf, sizeof time_buf, "%a %b %e %X %Y", &tm);
+	if (fp) {
+		time(&now);
+		localtime_r(&now, &tm);
+		time_buf_len = strftime(time_buf, sizeof time_buf, "%a %b %e %X %Y", &tm);
 
-	fprintf(fp, "%s: %s -> %s\n"
-		    "%*sSubject: %s\n"
-		    "%*sBody:    %s\n\n",
-		    time_buf, global_data->email_from, smtp->email_to,
-		    time_buf_len - 7, "", smtp->subject,
-		    time_buf_len - 7, "", smtp->body);
+		fprintf(fp, "%s: %s -> %s\n"
+			    "%*sSubject: %s\n"
+			    "%*sBody:    %s\n\n",
+			    time_buf, global_data->email_from, smtp->email_to,
+			    time_buf_len - 7, "", smtp->subject,
+			    time_buf_len - 7, "", smtp->body);
 
-	fclose(fp);
+		fclose(fp);
+	}
 
 	free_smtp_all(smtp);
 }
@@ -597,20 +595,19 @@ smtp_log_to_file(smtp_t *smtp)
 static void
 build_to_header_rcpt_addrs(smtp_t *smtp)
 {
-	const char *fetched_email;
 	char *email_to_addrs;
 	size_t bytes_available = SMTP_BUFFER_MAX - 1;
 	size_t bytes_to_write;
 	bool done_addr = false;
-	element e;
+	email_t *email;
 
 	if (smtp == NULL)
 		return;
 
 	email_to_addrs = smtp->email_to;
 
-	LIST_FOREACH(global_data->email, fetched_email, e) {
-		bytes_to_write = strlen(fetched_email);
+	list_for_each_entry(email, &global_data->email, e_list) {
+		bytes_to_write = strlen(email->addr);
 		if (done_addr) {
 			if (bytes_available < 2)
 				break;
@@ -626,7 +623,7 @@ build_to_header_rcpt_addrs(smtp_t *smtp)
 		if (bytes_available < bytes_to_write)
 			break;
 
-		strcpy(email_to_addrs, fetched_email);
+		strcpy(email_to_addrs, email->addr);
 
 		email_to_addrs += bytes_to_write;
 		bytes_available -= bytes_to_write;
@@ -649,11 +646,11 @@ smtp_alert(smtp_msg_t msg_type, void* data, const char *subject, const char *bod
 #endif
 
 	/* Only send mail if email specified */
-	if (LIST_ISEMPTY(global_data->email) || !global_data->smtp_server.ss_family)
+	if (list_empty(&global_data->email) || !global_data->smtp_server.ss_family)
 		return;
 
 	/* allocate & initialize smtp argument data structure */
-	smtp = (smtp_t *) MALLOC(sizeof(smtp_t));
+	PMALLOC(smtp);
 	smtp->subject = (char *) MALLOC(MAX_HEADERS_LENGTH);
 	smtp->body = (char *) MALLOC(MAX_BODY_LENGTH);
 	smtp->buffer = (char *) MALLOC(SMTP_BUFFER_MAX);

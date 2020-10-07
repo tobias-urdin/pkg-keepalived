@@ -42,7 +42,7 @@
 #include "assert_debug.h"
 
 /* Initial state */
-const bfd_t bfd0 = {
+static const bfd_t bfd0 = {
 	.local_state = BFD_STATE_DOWN,
 	.remote_state = BFD_STATE_DOWN,
 	.local_discr = 0,	/* ! */
@@ -61,6 +61,7 @@ const bfd_t bfd0 = {
 	.local_detect_time = 0,
 	.remote_detect_time = 0,
 	.last_seen = (struct timeval) {0},
+	.e_list = {NULL, NULL},		/* Not used - just here to be plaisant to compiler */
 };
 
 void

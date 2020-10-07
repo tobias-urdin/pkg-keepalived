@@ -24,21 +24,23 @@
 #define _VRRP_TRACK_PROCESS_H
 
 /* global includes */
+#include <stdbool.h>
 
 /* local includes */
-#include "track_process.h"
-#include "list.h"
+#include "list_head.h"
 #include "vrrp.h"
 
 #ifdef _TRACK_PROCESS_DEBUG_
 extern bool do_track_process_debug;
+extern bool do_track_process_debug_detail;
 #endif
+extern bool proc_events_not_supported;
 
 /* prototypes */
 extern void reload_track_processes(void);
 extern bool open_track_processes(void);
 extern bool close_track_processes(void);
-extern bool init_track_processes(list);
+extern bool init_track_processes(list_head_t *);
 extern void end_process_monitor(void);
 #ifdef THREAD_DUMP
 extern void register_process_monitor_addresses(void);
