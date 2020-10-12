@@ -1,3 +1,11 @@
+keepalived (1:2.1.5-0.2) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * [17cfc9a] d/control:
+    - Add B-depends: libpcre2-dev
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Mon, 12 Oct 2020 17:45:14 +0200
+
 keepalived (1:2.1.5-0.1) unstable; urgency=medium
 
   * Non-maintainer upload.
