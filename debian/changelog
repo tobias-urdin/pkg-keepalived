@@ -1,3 +1,10 @@
+keepalived (1:2.1.5-1) UNRELEASED; urgency=medium
+
+  * [61cbc18] New upstream version 2.2.1
+  * [ecf662d] Keepalived has now support for systemd notify
+
+ -- Alexander Wirt <formorer@debian.org>  Mon, 25 Jan 2021 09:04:08 +0100
+
 keepalived (1:2.1.5-0.2) unstable; urgency=medium
 
   * Non-maintainer upload.
