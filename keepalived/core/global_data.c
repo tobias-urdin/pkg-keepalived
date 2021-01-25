@@ -41,6 +41,8 @@
 #ifdef _WITH_FIREWALL_
 #include "vrrp_firewall.h"
 #endif
+#include "align.h"
+#include "pidfile.h"
 
 /* global vars */
 data_t *global_data = NULL;
@@ -88,9 +90,9 @@ static void
 set_default_mcast_group(data_t * data)
 {
 	/* coverity[check_return] */
-	inet_stosockaddr(INADDR_VRRP_GROUP, 0, (struct sockaddr_storage *)&data->vrrp_mcast_group4);
+	inet_stosockaddr(INADDR_VRRP_GROUP, 0, PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group4));
 	/* coverity[check_return] */
-	inet_stosockaddr(INADDR6_VRRP_GROUP, 0, (struct sockaddr_storage *)&data->vrrp_mcast_group6);
+	inet_stosockaddr(INADDR6_VRRP_GROUP, 0, PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group6));
 }
 
 static void
@@ -102,6 +104,9 @@ set_vrrp_defaults(data_t * data)
 	data->vrrp_garp_delay = VRRP_GARP_DELAY;
 	data->vrrp_garp_lower_prio_delay = PARAMETER_UNSET;
 	data->vrrp_garp_lower_prio_rep = PARAMETER_UNSET;
+#ifdef _HAVE_VRRP_VMAC_
+	data->vrrp_vmac_garp_intvl = 0;
+#endif
 	data->vrrp_lower_prio_no_advert = false;
 	data->vrrp_higher_prio_send_advert = false;
 	data->vrrp_version = VRRP_VERSION_2;
@@ -256,6 +261,15 @@ init_global_data(data_t * data, data_t *prev_global_data, bool copy_unchangeable
 		}
 	}
 
+	if (data->reload_file == DEFAULT_RELOAD_FILE) {
+		if (data->instance_name)
+			data->reload_file = make_pidfile_name(KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE, data->instance_name, RELOAD_EXTENSION);
+		else if (use_pid_dir)
+			data->reload_file = STRDUP(KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE RELOAD_EXTENSION);
+		else
+			data->reload_file = STRDUP(RUN_DIR KEEPALIVED_PID_FILE RELOAD_EXTENSION);
+	}
+
 	if (!data->local_name &&
 	    (!data->router_id ||
 	     (data->smtp_server.ss_family &&
@@ -367,14 +381,15 @@ free_global_data(data_t * data)
 	FREE_CONST_PTR(data->lvs_syncd.vrrp_name);
 #endif
 	FREE_CONST_PTR(data->notify_fifo.name);
-#ifndef _ONE_PROCESS_DEBUG_
-	FREE_CONST_PTR(data->reload_time_file);
-#endif
 	free_notify_script(&data->notify_fifo.script);
 #ifdef _WITH_VRRP_
 	FREE_CONST_PTR(data->default_ifname);
 	FREE_CONST_PTR(data->vrrp_notify_fifo.name);
 	free_notify_script(&data->vrrp_notify_fifo.script);
+#ifdef _HAVE_VRRP_VMAC_
+	FREE_CONST_PTR(data->vmac_prefix);
+	FREE_CONST_PTR(data->vmac_addr_prefix);
+#endif
 #ifdef _WITH_IPTABLES_
 	FREE_CONST_PTR(data->vrrp_iptables_inchain);
 	FREE_CONST_PTR(data->vrrp_iptables_outchain);
@@ -399,6 +414,12 @@ free_global_data(data_t * data)
 #ifdef _WITH_DBUS_
 	FREE_CONST_PTR(data->dbus_service_name);
 #endif
+#ifndef _ONE_PROCESS_DEBUG_
+	FREE_CONST_PTR(data->reload_check_config);
+	FREE_CONST_PTR(data->reload_file);
+	FREE_CONST_PTR(data->reload_time_file);
+#endif
+	FREE_CONST_PTR(data->config_directory);
 	FREE(data);
 }
 
@@ -469,6 +490,10 @@ dump_global_data(FILE *fp, data_t * data)
 	conf_write(fp, " Checkers log all failures = %s", data->checker_log_all_failures ? "true" : "false");
 #endif
 #ifndef _ONE_PROCESS_DEBUG_
+	if (data->reload_check_config)
+		conf_write(fp, " Test config before reload, log to %s", data->reload_check_config);
+	else
+		conf_write(fp, " No test config before reload");
 	if (data->reload_time_file) {
 		conf_write(fp, " Reload time file = %s%s", data->reload_time_file, data->reload_repeat ? " (repeat)" : "");
 		if (data->reload_time) {
@@ -478,7 +503,11 @@ dump_global_data(FILE *fp, data_t * data)
 		} else
 			conf_write(fp, " No reload scheduled");
 	}
+	if (data->reload_file)
+		conf_write(fp, " Reload_file = %s", data->reload_file);
 #endif
+	if (data->config_directory)
+		conf_write(fp, " config save directory = %s", data->config_directory);
 	if (data->startup_script)
 		conf_write(fp, " Startup script = %s, uid:gid %u:%u, timeout %u",
 			    cmd_str(data->startup_script),
@@ -510,6 +539,7 @@ dump_global_data(FILE *fp, data_t * data)
 	if (prog_type == PROG_TYPE_VRRP)
 #endif
 		conf_write(fp, " Default interface = %s", data->default_ifp ? data->default_ifp->ifname : DFLT_INT);
+	conf_write(fp, " Disable local IGMP = %s", data->disable_local_igmp ? "yes" : "no");
 	if (data->lvs_syncd.ifname) {
 		if (data->lvs_syncd.vrrp)
 			conf_write(fp, " LVS syncd vrrp instance = %s"
@@ -534,8 +564,8 @@ dump_global_data(FILE *fp, data_t * data)
 	}
 #endif
 	conf_write(fp, " LVS flush = %s", data->lvs_flush ? "true" : "false");
-	conf_write(fp, " LVS flush on stop = %s", data->lvs_flush_onstop == LVS_FLUSH_FULL ? "full" :
-						  data->lvs_flush_onstop == LVS_FLUSH_VS ? "VS" : "disabled");
+	conf_write(fp, " LVS flush on stop = %s", data->lvs_flush_on_stop == LVS_FLUSH_FULL ? "full" :
+						  data->lvs_flush_on_stop == LVS_FLUSH_VS ? "VS" : "disabled");
 #endif
 	if (data->notify_fifo.name) {
 		conf_write(fp, " Global notify fifo = %s, uid:gid %u:%u", data->notify_fifo.name, data->notify_fifo.uid, data->notify_fifo.gid);
@@ -569,11 +599,11 @@ dump_global_data(FILE *fp, data_t * data)
 	conf_write(fp, " VRRP notify priority changes = %s", data->vrrp_notify_priority_changes ? "true" : "false");
 	if (data->vrrp_mcast_group4.sin_family) {
 		conf_write(fp, " VRRP IPv4 mcast group = %s"
-				    , inet_sockaddrtos((struct sockaddr_storage *)&data->vrrp_mcast_group4));
+				    , inet_sockaddrtos(PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group4)));
 	}
 	if (data->vrrp_mcast_group6.sin6_family) {
 		conf_write(fp, " VRRP IPv6 mcast group = %s"
-				    , inet_sockaddrtos((struct sockaddr_storage *)&data->vrrp_mcast_group6));
+				    , inet_sockaddrtos(PTR_CAST(struct sockaddr_storage, &data->vrrp_mcast_group6)));
 	}
 	conf_write(fp, " Gratuitous ARP delay = %u",
 		       data->vrrp_garp_delay/TIMER_HZ);
@@ -582,6 +612,10 @@ dump_global_data(FILE *fp, data_t * data)
 	conf_write(fp, " Gratuitous ARP refresh repeat = %u", data->vrrp_garp_refresh_rep);
 	conf_write(fp, " Gratuitous ARP lower priority delay = %u", data->vrrp_garp_lower_prio_delay == PARAMETER_UNSET ? PARAMETER_UNSET : data->vrrp_garp_lower_prio_delay / TIMER_HZ);
 	conf_write(fp, " Gratuitous ARP lower priority repeat = %u", data->vrrp_garp_lower_prio_rep);
+#ifdef _HAVE_VRRP_VMAC_
+	if (data->vrrp_vmac_garp_intvl != PARAMETER_UNSET)
+		conf_write(fp, " Gratuitous ARP for each secondary %s = %us", data->vrrp_vmac_garp_all_if ? "i/f" : "VMAC", data->vrrp_vmac_garp_intvl);
+#endif
 	conf_write(fp, " Send advert after receive lower priority advert = %s", data->vrrp_lower_prio_no_advert ? "false" : "true");
 	conf_write(fp, " Send advert after receive higher priority advert = %s", data->vrrp_higher_prio_send_advert ? "true" : "false");
 	conf_write(fp, " Gratuitous ARP interval = %f", data->vrrp_garp_interval / TIMER_HZ_DOUBLE);
@@ -721,6 +755,12 @@ dump_global_data(FILE *fp, data_t * data)
 		conf_write(fp, " vrrp_startup_delay = %g", global_data->vrrp_startup_delay / TIMER_HZ_DOUBLE);
 	if (global_data->log_unknown_vrids)
 		conf_write(fp, " log_unknown_vrids");
+#ifdef _HAVE_VRRP_VMAC_
+	if (global_data->vmac_prefix)
+		conf_write(fp, " VMAC prefix = %s", global_data->vmac_prefix);
+	if (global_data->vmac_addr_prefix)
+		conf_write(fp, " VMAC address prefix = %s", global_data->vmac_addr_prefix);
+#endif
 #endif
 	if ((val = get_cur_priority()))
 		conf_write(fp, " current realtime priority = %u", val);

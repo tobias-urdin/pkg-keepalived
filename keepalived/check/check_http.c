@@ -305,7 +305,7 @@ free_http_request(request_t *req)
 }
 
 static void
-free_http_get_check(checker_t *checker)
+free_http_check(checker_t *checker)
 {
 	http_checker_t *http_get_chk = checker->data;
 
@@ -318,7 +318,7 @@ free_http_get_check(checker_t *checker)
 }
 
 static void
-dump_http_get_check(FILE *fp, const checker_t *checker)
+dump_http_check(FILE *fp, const checker_t *checker)
 {
 	const http_checker_t *http_get_chk = checker->data;
 
@@ -326,7 +326,6 @@ dump_http_get_check(FILE *fp, const checker_t *checker)
 			http_get_chk->proto == PROTO_HTTP ? "HTTP" : "SSL",
 			http_get_chk->http_protocol == HTTP_PROTOCOL_1_0C ? "1.0C" :
 			  http_get_chk->http_protocol == HTTP_PROTOCOL_1_1 ? "1.1" : "1.0");
-	dump_checker_opts(fp, checker);
 	if (http_get_chk->virtualhost)
 		conf_write(fp, "   Virtualhost = %s", http_get_chk->virtualhost);
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
@@ -366,7 +365,7 @@ url_list_size(const list_head_t *l)
 }
 
 static bool __attribute__((pure))
-http_get_check_compare(const checker_t *old_c, checker_t *new_c)
+compare_http_check(const checker_t *old_c, checker_t *new_c)
 {
 	const http_checker_t *old = old_c->data;
 	const http_checker_t *new = new_c->data;
@@ -403,7 +402,7 @@ http_get_check_compare(const checker_t *old_c, checker_t *new_c)
 		if (!u1->regex != !u2->regex)
 			return false;
 		if (u1->regex) {
-			if (strcmp((const char *)u1->regex->pattern, (const char *)u2->regex->pattern))
+			if (strcmp(PTR_CAST_CONST(char, u1->regex->pattern), PTR_CAST_CONST(char, u2->regex->pattern)))
 				return false;
 			if (u1->regex->pcre2_options != u2->regex->pcre2_options)
 				return false;
@@ -419,6 +418,8 @@ http_get_check_compare(const checker_t *old_c, checker_t *new_c)
 	return true;
 }
 
+static const checker_funcs_t http_checker_funcs = { CHECKER_HTTP, free_http_check, dump_http_check, compare_http_check, NULL };
+
 /* Configuration stream handling */
 static void
 http_get_handler(const vector_t *strvec)
@@ -429,9 +430,7 @@ http_get_handler(const vector_t *strvec)
 
 	/* queue new checker */
 	http_get_chk = alloc_http_get(str);
-	checker = queue_checker(free_http_get_check, dump_http_get_check,
-				http_connect_thread, http_get_check_compare,
-				http_get_chk, CHECKER_NEW_CO(), true);
+	checker = queue_checker(&http_checker_funcs, http_connect_thread, http_get_chk, CHECKER_NEW_CO(), true);
 	checker->default_delay_before_retry = 3 * TIMER_HZ;
 }
 
@@ -628,7 +627,7 @@ regex_handler(__attribute__((unused)) const vector_t *strvec)
 		return;
 	}
 
-	conf_regex_pattern = (const unsigned char *)set_value(strvec_qe);
+	conf_regex_pattern = PTR_CAST_CONST(unsigned char, set_value(strvec_qe));
 	free_strvec(strvec_qe);
 }
 
@@ -748,7 +747,7 @@ prepare_regex(url_t *url)
 	/* See if this regex has already been specified */
 	list_for_each_entry(r, &regexs, e_list) {
 		if (r->pcre2_options == conf_regex_options &&
-		    !strcmp((const char *)r->pattern, (const char *)conf_regex_pattern)) {
+		    !strcmp(PTR_CAST_CONST(char, r->pattern), PTR_CAST_CONST(char, conf_regex_pattern))) {
 			url->regex = r;
 			FREE_CONST_PTR(conf_regex_pattern);
 			url->regex->refcnt++;
@@ -772,7 +771,7 @@ prepare_regex(url_t *url)
 	if(r->pcre2_reCompiled == NULL) {
 		pcre2_get_error_message(pcreErrorNumber, buffer, sizeof buffer);
 		log_message(LOG_INFO, "Invalid regex: '%s' at offset %zu: %s\n"
-				    , r->pattern, pcreErrorOffset, (char *)buffer);
+				    , r->pattern, pcreErrorOffset, PTR_CAST(char, buffer));
 
 		FREE_CONST_PTR(r->pattern);
 		FREE(r);
@@ -787,7 +786,7 @@ prepare_regex(url_t *url)
 	if ((pcreErrorNumber = pcre2_jit_compile(r->pcre2_reCompiled, PCRE2_JIT_PARTIAL_HARD /* | PCRE2_JIT_COMPLETE */))) {
 		pcre2_get_error_message(pcreErrorNumber, buffer, sizeof buffer);
 		log_message(LOG_INFO, "Regex JIT compilation failed: '%s': %s\n"
-				    , r->pattern, (char *)buffer);
+				    , r->pattern, PTR_CAST(char, buffer));
 
 		FREE_CONST_PTR(r->pattern);
 		FREE(r);
@@ -1017,7 +1016,7 @@ epilog(thread_ref_t thread, register_checker_t method)
 		if (checker->is_up || !checker->has_run) {
 			if (checker->has_run && checker->retry)
 				log_message(LOG_INFO
-				   , "HTTP_CHECK on service %s failed after %u retry."
+				   , "HTTP_CHECK on service %s failed after %u retries."
 				   , FMT_CHK(checker)
 				   , checker->retry_it - 1);
 			else
@@ -1173,7 +1172,7 @@ check_regex(url_t *url, request_t *req)
 	pcreExecRet = pcre2_match
 #endif
 				(url->regex->pcre2_reCompiled,
-				 (unsigned char *)req->buffer,
+				 PTR_CAST(unsigned char, req->buffer),
 				 req->len,
 				 start_offset,
 				 PCRE2_PARTIAL_HARD,
@@ -1480,7 +1479,7 @@ http_response_thread(thread_ref_t thread)
 	}
 
 	/* Allocate & clean the get buffer */
-	req->buffer = (char *) MALLOC(MAX_BUFFER_LENGTH);
+	req->buffer = PTR_CAST(char, MALLOC(MAX_BUFFER_LENGTH));
 	req->extracted = NULL;
 	req->len = 0;
 	req->error = 0;
@@ -1526,7 +1525,7 @@ http_request_thread(thread_ref_t thread)
 	}
 
 	/* Allocate & clean the GET string */
-	str_request = (char *) MALLOC(GET_BUFFER_LENGTH);
+	str_request = PTR_CAST(char, MALLOC(GET_BUFFER_LENGTH));
 
 	fetched_url = fetch_next_url(http_get_check);
 
@@ -1615,7 +1614,7 @@ http_check_thread(thread_ref_t thread)
 
 	case connect_success:
 		if (!http_get_check->req) {
-			http_get_check->req = (request_t *) MALLOC(sizeof (request_t));
+			PMALLOC(http_get_check->req);
 			new_req = true;
 		} else
 			new_req = false;

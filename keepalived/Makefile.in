@@ -108,8 +108,8 @@ CONFIG_HEADER = $(top_builddir)/lib/config.h \
 	$(top_builddir)/lib/config_warnings.h
 CONFIG_CLEAN_FILES =
 CONFIG_CLEAN_VPATH_FILES =
-am__installdirs = "$(DESTDIR)$(sbindir)" "$(DESTDIR)$(configdir)" \
-	"$(DESTDIR)$(initdir)" "$(DESTDIR)$(sysconfigdir)" \
+am__installdirs = "$(DESTDIR)$(sbindir)" "$(DESTDIR)$(initdir)" \
+	"$(DESTDIR)$(sysconfigdir)" \
 	"$(DESTDIR)$(systemdsystemunitdir)"
 PROGRAMS = $(sbin_PROGRAMS)
 am_keepalived_OBJECTS = main.$(OBJEXT)
@@ -188,8 +188,7 @@ am__uninstall_files_from_dir = { \
     || { echo " ( cd '$$dir' && rm -f" $$files ")"; \
          $(am__cd) "$$dir" && rm -f $$files; }; \
   }
-DATA = $(config_DATA) $(init_DATA) $(sysconfig_DATA) \
-	$(systemdsystemunit_DATA)
+DATA = $(init_DATA) $(sysconfig_DATA) $(systemdsystemunit_DATA)
 HEADERS = $(noinst_HEADERS)
 RECURSIVE_CLEAN_TARGETS = mostlyclean-recursive clean-recursive	\
   distclean-recursive maintainer-clean-recursive
@@ -262,7 +261,9 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
+DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -284,6 +285,7 @@ KA_CFLAGS = @KA_CFLAGS@
 KA_CPPFLAGS = @KA_CPPFLAGS@
 KA_LDFLAGS = @KA_LDFLAGS@
 KA_LIBS = @KA_LIBS@
+KA_TMP_DIR = @KA_TMP_DIR@
 LDD = @LDD@
 LDFLAGS = @LDFLAGS@
 LIBOBJS = @LIBOBJS@
@@ -307,13 +309,14 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR = @RUN_DIR@
+RUN_DIR_ROOT = @RUN_DIR_ROOT@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SNMP_SERVICE = @SNMP_SERVICE@
 SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
+SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -371,7 +374,8 @@ edit = echo "  EDIT     $@"; \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
 	 -e 's|@RUN_DIR[@]|$(RUN_DIR)|g' \
-	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g'
+	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g' \
+	 -e 's|@SYSTEMD_SERVICE_TYPE[@]|$(SYSTEMD_SERVICE_TYPE)|g'
 
 keepalived_SOURCES = main.c
 noinst_HEADERS = $(srcdir)/include/*.h
@@ -390,8 +394,6 @@ keepalived_LDADD = core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcor
 MOSTLYCLEANFILES = keepalived.service
 sysconfigdir = $(sysconfdir)/sysconfig
 sysconfig_DATA = etc/sysconfig/keepalived
-configdir = $(sysconfdir)/@PACKAGE@
-config_DATA = etc/keepalived/keepalived.conf
 @INIT_SYSTEMD_TRUE@systemdsystemunit_DATA = keepalived.service
 @INIT_OPENRC_TRUE@initdir = $(sysconfdir)/init.d
 @INIT_OPENRC_TRUE@init_DATA = etc/openrc/keepalived
@@ -496,27 +498,6 @@ distclean-compile:
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='$<' object='$@' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(COMPILE) -c -o $@ `$(CYGPATH_W) '$<'`
-install-configDATA: $(config_DATA)
-	@$(NORMAL_INSTALL)
-	@list='$(config_DATA)'; test -n "$(configdir)" || list=; \
-	if test -n "$$list"; then \
-	  echo " $(MKDIR_P) '$(DESTDIR)$(configdir)'"; \
-	  $(MKDIR_P) "$(DESTDIR)$(configdir)" || exit 1; \
-	fi; \
-	for p in $$list; do \
-	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
-	  echo "$$d$$p"; \
-	done | $(am__base_list) | \
-	while read files; do \
-	  echo " $(INSTALL_DATA) $$files '$(DESTDIR)$(configdir)'"; \
-	  $(INSTALL_DATA) $$files "$(DESTDIR)$(configdir)" || exit $$?; \
-	done
-
-uninstall-configDATA:
-	@$(NORMAL_UNINSTALL)
-	@list='$(config_DATA)'; test -n "$(configdir)" || list=; \
-	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
-	dir='$(DESTDIR)$(configdir)'; $(am__uninstall_files_from_dir)
 install-initDATA: $(init_DATA)
 	@$(NORMAL_INSTALL)
 	@list='$(init_DATA)'; test -n "$(initdir)" || list=; \
@@ -740,7 +721,7 @@ check: check-recursive
 all-am: Makefile $(PROGRAMS) $(DATA) $(HEADERS)
 installdirs: installdirs-recursive
 installdirs-am:
-	for dir in "$(DESTDIR)$(sbindir)" "$(DESTDIR)$(configdir)" "$(DESTDIR)$(initdir)" "$(DESTDIR)$(sysconfigdir)" "$(DESTDIR)$(systemdsystemunitdir)"; do \
+	for dir in "$(DESTDIR)$(sbindir)" "$(DESTDIR)$(initdir)" "$(DESTDIR)$(sysconfigdir)" "$(DESTDIR)$(systemdsystemunitdir)"; do \
 	  test -z "$$dir" || $(MKDIR_P) "$$dir"; \
 	done
 install: install-recursive
@@ -797,8 +778,8 @@ info: info-recursive
 
 info-am:
 
-install-data-am: install-configDATA install-initDATA \
-	install-sysconfigDATA install-systemdsystemunitDATA
+install-data-am: install-initDATA install-sysconfigDATA \
+	install-systemdsystemunitDATA
 
 install-dvi: install-dvi-recursive
 
@@ -843,9 +824,8 @@ ps: ps-recursive
 
 ps-am:
 
-uninstall-am: uninstall-configDATA uninstall-initDATA \
-	uninstall-sbinPROGRAMS uninstall-sysconfigDATA \
-	uninstall-systemdsystemunitDATA
+uninstall-am: uninstall-initDATA uninstall-sbinPROGRAMS \
+	uninstall-sysconfigDATA uninstall-systemdsystemunitDATA
 
 .MAKE: $(am__recursive_targets) install-am install-strip
 
@@ -853,17 +833,16 @@ uninstall-am: uninstall-configDATA uninstall-initDATA \
 	check-am clean clean-generic clean-sbinPROGRAMS cscopelist-am \
 	ctags ctags-am distclean distclean-compile distclean-generic \
 	distclean-tags distdir dvi dvi-am html html-am info info-am \
-	install install-am install-configDATA install-data \
-	install-data-am install-dvi install-dvi-am install-exec \
-	install-exec-am install-html install-html-am install-info \
-	install-info-am install-initDATA install-man install-pdf \
-	install-pdf-am install-ps install-ps-am install-sbinPROGRAMS \
-	install-strip install-sysconfigDATA \
-	install-systemdsystemunitDATA installcheck installcheck-am \
-	installdirs installdirs-am maintainer-clean \
-	maintainer-clean-generic mostlyclean mostlyclean-compile \
-	mostlyclean-generic pdf pdf-am ps ps-am tags tags-am uninstall \
-	uninstall-am uninstall-configDATA uninstall-initDATA \
+	install install-am install-data install-data-am install-dvi \
+	install-dvi-am install-exec install-exec-am install-html \
+	install-html-am install-info install-info-am install-initDATA \
+	install-man install-pdf install-pdf-am install-ps \
+	install-ps-am install-sbinPROGRAMS install-strip \
+	install-sysconfigDATA install-systemdsystemunitDATA \
+	installcheck installcheck-am installdirs installdirs-am \
+	maintainer-clean maintainer-clean-generic mostlyclean \
+	mostlyclean-compile mostlyclean-generic pdf pdf-am ps ps-am \
+	tags tags-am uninstall uninstall-am uninstall-initDATA \
 	uninstall-sbinPROGRAMS uninstall-sysconfigDATA \
 	uninstall-systemdsystemunitDATA
 

@@ -47,33 +47,17 @@
 #include "../keepalived/include/vrrp_json.h"
 #endif
 
-#ifdef _WITH_JSON_
-  /* We need to include the realtime signals, but
-   * unfortunately SIGRTMIN/SIGRTMAX are not constants.
-   * I'm not clear if _NSIG is always defined, so play safe.
-   * Although we are not meant to use __SIGRTMAX, we are
-   * using it here as an upper bound, which is rather different. */
-  #ifdef _NSIG
-    #define SIG_MAX	_NSIG
-  #elif defined __SIGRTMAX
-    #define SIG_MAX __SIGRTMAX
-  #else
-    #define SIG_MAX 64
-  #endif
+/* We need to include the realtime signals, but
+ * unfortunately SIGRTMIN/SIGRTMAX are not constants.
+ * I'm not clear if _NSIG is always defined, so play safe.
+ * Although we are not meant to use __SIGRTMAX, we are
+ * using it here as an upper bound, which is rather different. */
+#ifdef _NSIG
+  #define SIG_MAX	_NSIG
+#elif defined __SIGRTMAX
+  #define SIG_MAX __SIGRTMAX
 #else
-  /* The signals currently used are HUP, INT, TERM, USR1,
-   * USR2, CHLD and XCPU. */
-  #if SIGCHLD > SIGUSR2
-    /* Architectures except alpha and sparc - see signal(7) */
-    #if HAVE_DECL_RLIMIT_RTTIME == 1
-      #define SIG_MAX SIGXCPU
-    #else
-      #define SIG_MAX SIGCHLD
-    #endif
-  #else
-    /* alpha and sparc */
-    #define SIG_MAX SIGUSR2
-  #endif
+  #define SIG_MAX 64
 #endif
 
 /* Local Vars */
@@ -223,7 +207,7 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	else
 		sigdelset(&dfl_sig, signo);
 
-	if (func == (void*)SIG_IGN || func == (void*)SIG_DFL) {
+	if (func == (void *)SIG_IGN || func == (void *)SIG_DFL) {
 		/* We are no longer handling the signal, so
 		 * clear our handlers */
 		func = NULL;
@@ -263,7 +247,7 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	if (func)
 		sig.sa_handler = signal_handler;
 	else
-		sig.sa_handler = (void*)func;
+		sig.sa_handler = (void *)func;
 
 	sigemptyset(&sig.sa_mask);
 	sig.sa_flags = 0;
@@ -534,11 +518,6 @@ signal_handler_script(void)
 	int sig;
 #ifdef HAVE_SIGNALFD
 	sigset_t sset;
-
-	if (signal_fd != -1){
-		close(signal_fd);
-		signal_fd = -1;
-	}
 #endif
 
 	dfl.sa_handler = SIG_DFL;
@@ -566,25 +545,6 @@ set_sigxcpu_handler(void)
 #endif
 }
 #endif
-
-void signal_fd_close(int min_fd)
-{
-#ifdef HAVE_SIGNALFD
-	if (signal_fd >= min_fd) {
-		close(signal_fd);
-		signal_fd = -1;
-	}
-#else
-	if (signal_pipe[0] >= min_fd) {
-		close(signal_pipe[0]);
-		signal_pipe[0] = -1;
-	}
-	if (signal_pipe[1] >= min_fd) {
-		close(signal_pipe[1]);
-		signal_pipe[1] = -1;
-	}
-#endif
-}
 
 #ifdef THREAD_DUMP
 void

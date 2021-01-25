@@ -34,7 +34,6 @@
 //#define LIBNL_DEBUG
 
 #ifdef _HAVE_LIBNL1_
-#define nl_sock		nl_handle
 #ifndef _LIBNL_DYNAMIC_
 #define nl_socket_alloc	nl_handle_alloc
 #define nl_socket_free	nl_handle_destroy
@@ -250,7 +249,7 @@ dump_nl_msg(const char *msg, struct nl_msg *nlmsg)
 {
 	FILE *fp;
 
-	fp = fopen("/tmp/nlmsg.dmp", "a");
+	fp = fopen(KA_TMP_DIR "/nlmsg.dmp", "a");
 	fprintf(fp, "\n%s\n\n", msg);
 	if (nlmsg)
 		nl_msg_dump(nlmsg, fp);
@@ -337,7 +336,11 @@ open_nl_sock(void)
 	}
 
 	/* We finish receiving if we get an error, an ACK, or a DONE for a multipart message */
-	if (nl_socket_modify_err_cb(sock, NL_CB_CUSTOM, ipvs_nl_err_cb, &nl_ack_flag) != 0)
+#ifndef _HAVE_LIBNL1_
+	if (nl_socket_modify_err_cb(sock, NL_CB_CUSTOM, ipvs_nl_err_cb, &nl_ack_flag))
+#else
+	if (nl_cb_err(nl_socket_get_cb(sock), NL_CB_CUSTOM, ipvs_nl_err_cb, &nl_ack_flag))
+#endif
 		log_message(LOG_INFO, "Setting err_cb failed");
 
 	nl_socket_modify_cb(sock, NL_CB_ACK, NL_CB_CUSTOM, recv_ack_cb, &nl_ack_flag);
@@ -374,7 +377,11 @@ static int ipvs_nl_send_message(struct nl_msg *msg, nl_recvmsg_msg_cb_t func, vo
 	dump_nl_msg("Sending message", msg);
 #endif
 
+#ifndef _HAVE_LIBNL1_
 	if (nl_send_auto(sock, msg) >= 0) {
+#else
+	if (nl_send_auto_complete(sock, msg) >= 0) {
+#endif
 		nl_ack_flag = 0;
 		do {
 			if ((err = -nl_recvmsgs_default(sock)) > 0) {
@@ -764,7 +771,7 @@ static int ipvs_timeout_parse_cb(struct nl_msg *msg, void *arg)
 {
 	struct nlmsghdr *nlh = nlmsg_hdr(msg);
 	struct nlattr *attrs[IPVS_CMD_ATTR_MAX + 1];
-	ipvs_timeout_t *u = (ipvs_timeout_t *)arg;
+	ipvs_timeout_t *u = PTR_CAST(ipvs_timeout_t, arg);
 
 	if (genlmsg_parse(nlh, 0, attrs, IPVS_CMD_ATTR_MAX, ipvs_cmd_policy) != 0)
 		return -1;
@@ -995,8 +1002,8 @@ static int ipvs_services_parse_cb(struct nl_msg *msg, void *arg)
 	struct nlmsghdr *nlh = nlmsg_hdr(msg);
 	struct nlattr *attrs[IPVS_CMD_ATTR_MAX + 1];
 	struct nlattr *svc_attrs[IPVS_SVC_ATTR_MAX + 1];
-	struct ip_vs_get_services_app **getp = (struct ip_vs_get_services_app **)arg;
-	struct ip_vs_get_services_app *get = (struct ip_vs_get_services_app *)*getp;
+	struct ip_vs_get_services_app **getp = PTR_CAST(struct ip_vs_get_services_app *, arg);
+	struct ip_vs_get_services_app *get = PTR_CAST(struct ip_vs_get_services_app, *getp);
 	struct ip_vs_flags flags;
 	unsigned i = get->user.num_services;
 
@@ -1080,8 +1087,8 @@ static int ipvs_dests_parse_cb(struct nl_msg *msg, void *arg)
 #if HAVE_DECL_IPVS_DEST_ATTR_ADDR_FAMILY
 	struct nlattr *attr_addr_family = NULL;
 #endif
-	struct ip_vs_get_dests_app **dp = (struct ip_vs_get_dests_app **)arg;
-	struct ip_vs_get_dests_app *d = (struct ip_vs_get_dests_app *)*dp;
+	struct ip_vs_get_dests_app **dp = PTR_CAST(struct ip_vs_get_dests_app *, arg);
+	struct ip_vs_get_dests_app *d = PTR_CAST(struct ip_vs_get_dests_app, *dp);
 	unsigned i = d->user.num_dests;
 
 	if (genlmsg_parse(nlh, 0, attrs, IPVS_CMD_ATTR_MAX, ipvs_cmd_policy) != 0)

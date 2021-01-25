@@ -89,7 +89,7 @@ weigh_live_realservers(virtual_server_t *vs)
 
 	list_for_each_entry(rs, &vs->rs, e_list) {
 		if (ISALIVE(rs))
-			count += rs->weight;
+			count += real_weight(rs->effective_weight);
 	}
 	return count;
 }
@@ -298,13 +298,30 @@ clear_service_rs_list(virtual_server_t *vs, list_head_t *l, bool stopping)
 	update_vs_notifies(vs, stopping);
 }
 
+static void
+clear_vsg_rs_counts(virtual_server_t *vs)
+{
+	virtual_server_group_entry_t *vsg_entry;
+	real_server_t *rs;
+
+	list_for_each_entry(vsg_entry, &vs->vsg->addr_range, e_list) {
+		list_for_each_entry(rs, &vs->rs, e_list)
+			unset_vsge_alive(vsg_entry, vs);
+	}
+
+	list_for_each_entry(vsg_entry, &vs->vsg->vfwmark, e_list) {
+		list_for_each_entry(rs, &vs->rs, e_list)
+			unset_vsge_alive(vsg_entry, vs);
+	}
+}
+
 /* Remove a virtualserver IPVS rule */
 static void
 clear_service_vs(virtual_server_t * vs, bool stopping)
 {
 	bool sav_inhibit;
 
-	if (global_data->lvs_flush_onstop == LVS_NO_FLUSH) {
+	if (global_data->lvs_flush_on_stop == LVS_NO_FLUSH) {
 		/* Processing real server queue */
 		if (vs->s_svr && vs->s_svr->set) {
 			if (vs->s_svr_duplicates_rs)
@@ -325,9 +342,15 @@ clear_service_vs(virtual_server_t * vs, bool stopping)
 		/* Even if the sorry server was configured, if we are using
 		 * inhibit_on_failure, then real servers may be configured. */
 		clear_service_rs_list(vs, &vs->rs, stopping);
+	} else {
+		update_vs_notifies(vs, stopping);
+
+		if (global_data->lvs_flush_on_stop == LVS_FLUSH_VS && vs->vsg)
+			clear_vsg_rs_counts(vs);
+
+		if (vs->s_svr && vs->s_svr->set)
+			UNSET_ALIVE(vs->s_svr);
 	}
-	else if (vs->s_svr && vs->s_svr->set)
-		UNSET_ALIVE(vs->s_svr);
 
 	/* The above will handle Omega case for VS as well. */
 
@@ -345,11 +368,18 @@ clear_services(void)
 	if (!check_data || list_empty(&check_data->vs))
 		return;
 
-	list_for_each_entry(vs, &check_data->vs, e_list) {
-		/* Remove the real servers, and clear the vs unless it is
-		 * using a VS group and it is not the last vs of the same
-		 * protocol or address family using the group. */
-		clear_service_vs(vs, true);
+	if (global_data->lvs_flush_on_stop == LVS_FLUSH_FULL) {
+		ipvs_flush_cmd();
+
+		list_for_each_entry(vs, &check_data->vs, e_list)
+			update_vs_notifies(vs, true);
+	} else {
+		list_for_each_entry(vs, &check_data->vs, e_list) {
+			/* Remove the real servers, and clear the vs unless it is
+			 * using a VS group and it is not the last vs of the same
+			 * protocol or address family using the group. */
+			clear_service_vs(vs, true);
+		}
 	}
 }
 
@@ -359,41 +389,25 @@ init_service_rs(virtual_server_t *vs)
 {
 	real_server_t *rs;
 	tracked_file_monitor_t *tfm;
-	long weight;
 
 	list_for_each_entry(rs, &vs->rs, e_list) {
 		if (rs->reloaded) {
-			if (rs->iweight != rs->pweight)
-				update_svr_wgt(rs->iweight, vs, rs, false);
+			if (rs->effective_weight != rs->peffective_weight)
+				update_svr_wgt(rs->effective_weight, vs, rs, false);
 			/* Do not re-add failed RS instantly on reload */
 			continue;
 		}
 
-		/* TODO - is this copied on reload? */
-		rs->effective_weight = rs->weight;
-
-		if (!rs->reloaded) {
+		/* On a reload with a new RS the num_failed_checkers is updated in set_track_file_checkers_down() */
+		if (!reload) {
 			list_for_each_entry(tfm, &rs->track_files, e_list) {
 				if (tfm->weight) {
-					weight = tfm->file->last_status * tfm->weight * tfm->weight_reverse;
-					if (weight <= -IPVS_WEIGHT_MAX) {
+					if ((int64_t)tfm->file->last_status * tfm->weight * (tfm->weight_reverse ? -1 : 1) <= IPVS_WEIGHT_FAULT)
 						rs->num_failed_checkers++;
-						weight = 0;
-					}
-					else if (weight > IPVS_WEIGHT_MAX - 1)
-						weight = IPVS_WEIGHT_MAX -1;
-					rs->effective_weight += weight;
 				}
 				else if (tfm->file->last_status)
 					rs->num_failed_checkers++;
 			}
-
-			if (rs->effective_weight < 1)
-				rs->weight = 1;
-			else if (rs->effective_weight > IPVS_WEIGHT_MAX - 1)
-				rs->weight = IPVS_WEIGHT_MAX - 1;
-			else
-				rs->weight = rs->effective_weight;
 		}
 
 		/* In alpha mode, be pessimistic (or realistic?) and don't
@@ -640,27 +654,24 @@ init_services(void)
 
 /* Store new weight in real_server struct and then update kernel. */
 void
-update_svr_wgt(int weight, virtual_server_t * vs, real_server_t * rs
+update_svr_wgt(int64_t weight, virtual_server_t * vs, real_server_t * rs
 		, bool update_quorum)
 {
+	int old_weight, new_weight;
+
+
+	new_weight = real_weight(weight);
+	old_weight = real_weight(rs->effective_weight);
+
 	rs->effective_weight = weight;
 
-/* TODO - handle weight = 0 - ? affects quorum */
-	if (weight <= 0)
-		weight = 1;
-#if IPVS_WEIGHT_MAX != INT_MAX
-	else if (weight > IPVS_WEIGHT_MAX)
-		weight = IPVS_WEIGHT_MAX;
-#endif
-
-	if (weight != rs->weight) {
+	if (new_weight != old_weight) {
 		log_message(LOG_INFO, "Changing weight from %d to %d for %sactive service %s of VS %s"
-				    , rs->weight
-				    , weight
+				    , old_weight
+				    , new_weight
 				    , ISALIVE(rs) ? "" : "in"
 				    , FMT_RS(rs, vs)
 				    , FMT_VS(vs));
-		rs->weight = weight;
 		/*
 		 * Have weight change take effect now only if rs is in
 		 * the pool and alive and the quorum is met (or if
@@ -854,19 +865,33 @@ migrate_checkers(virtual_server_t *vs, real_server_t *old_rs, real_server_t *new
 
 	if (!list_empty(&l)) {
 		list_for_each_entry(new_c, &checkers_queue, e_list) {
-			if (new_c->rs != new_rs || !new_c->compare)
+			if (new_c->rs != new_rs || !new_c->checker_funcs->compare)
 				continue;
 			list_for_each_entry(ref, &l, e_list) {
 				old_c = ref->checker;
-				if (old_c->compare == new_c->compare && new_c->compare(old_c, new_c)) {
+				if (old_c->checker_funcs->type == new_c->checker_funcs->type && new_c->checker_funcs->compare(old_c, new_c)) {
 					/* Update status if different */
 					if (old_c->has_run && old_c->is_up != new_c->is_up)
 						set_checker_state(new_c, old_c->is_up);
 
 					/* Transfer some other state flags */
 					new_c->has_run = old_c->has_run;
-// retry_it needs fixing -  if retry changes, we may already have exceeded count
-					new_c->retry_it = old_c->retry_it;
+
+					/* If we have already had sufficient retries for the new retry value,
+					 * we hadn't already failed, so just require one more failure to trigger
+					 * failed state.
+					 * If we no longer have any retries, one more failure should trigger
+					 * failed state.
+					 */
+					if (old_c->retry_it && new_c->retry) {
+						if (old_c->retry_it >= new_c->retry)
+							new_c->retry_it = new_c->retry - 1;
+						else
+							new_c->retry_it = old_c->retry_it;
+					}
+
+					if (new_c->checker_funcs->migrate)
+						new_c->checker_funcs->migrate(new_c, old_c);
 
 					break;
 				}
@@ -941,8 +966,8 @@ clear_diff_rs(virtual_server_t *old_vs, virtual_server_t *new_vs, list_head_t *o
 		 */
 		new_rs->alive = rs->alive;
 		new_rs->set = rs->set;
-		new_rs->weight = rs->weight;
-		new_rs->pweight = rs->iweight;
+		new_rs->effective_weight = rs->effective_weight;
+		new_rs->peffective_weight = rs->effective_weight;
 		new_rs->reloaded = true;
 
 		/*
@@ -957,7 +982,7 @@ clear_diff_rs(virtual_server_t *old_vs, virtual_server_t *new_vs, list_head_t *o
 		migrate_checkers(new_vs, rs, new_rs, old_checkers_queue);
 
 		/* Do we need to update the RS configuration? */
-		if (false ||
+		if ((new_rs->alive && new_rs->effective_weight != rs->effective_weight) ||
 #ifdef _HAVE_IPVS_TUN_TYPE_
 		    rs->tun_type != new_rs->tun_type ||
 		    rs->tun_port != new_rs->tun_port ||
@@ -985,15 +1010,14 @@ clear_diff_s_srv(virtual_server_t *old_vs, real_server_t *new_rs)
 		/* which fields are really used on s_svr? */
 		new_rs->alive = old_rs->alive;
 		new_rs->set = old_rs->set;
-		new_rs->weight = old_rs->weight;
-		new_rs->pweight = old_rs->iweight;
+		new_rs->effective_weight = new_rs->iweight;
 		new_rs->reloaded = true;
 	}
 	else {
 		if (old_rs->inhibit) {
 			if (!ISALIVE(old_rs) && old_rs->set)
 				SET_ALIVE(old_rs);
-			old_rs->inhibit = 0;
+			old_rs->inhibit = false;
 		}
 		if (ISALIVE(old_rs)) {
 			log_message(LOG_INFO, "Removing sorry server %s from VS %s"
@@ -1002,7 +1026,6 @@ clear_diff_s_srv(virtual_server_t *old_vs, real_server_t *new_rs)
 			ipvs_cmd(LVS_CMD_DEL_DEST, old_vs, old_rs);
 		}
 	}
-
 }
 
 /* When reloading configuration, remove negative diff entries
@@ -1151,7 +1174,7 @@ link_vsg_to_vs(void)
 
 			if (!strcmp(vs->vsgname, vsg->gname)) {
 				/* We use the IPv4 port since there is no address family */
-				((struct sockaddr_in *)&vs->addr)->sin_port = htons(vsg_member_no);
+				PTR_CAST(struct sockaddr_in, &vs->addr)->sin_port = htons(vsg_member_no);
 				vsg_member_no++;
 			}
 		}

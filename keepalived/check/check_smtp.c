@@ -87,11 +87,10 @@ dump_smtp_check(FILE *fp, const checker_t *checker)
 
 	conf_write(fp, "   Keepalive method = SMTP_CHECK");
 	conf_write(fp, "   helo = %s", smtp_checker->helo_name);
-	dump_checker_opts(fp, checker);
 }
 
 static bool
-smtp_check_compare(const checker_t *old_c, checker_t *new_c)
+compare_smtp_check(const checker_t *old_c, checker_t *new_c)
 {
 	const smtp_checker_t *old = old_c->data;
 	const smtp_checker_t *new = new_c->data;
@@ -103,6 +102,8 @@ smtp_check_compare(const checker_t *old_c, checker_t *new_c)
 
 	return true;
 }
+
+static const checker_funcs_t smtp_checker_funcs = { CHECKER_SMTP, free_smtp_check, dump_smtp_check, compare_smtp_check, NULL };
 
 /*
  * Callback for whenever an SMTP_CHECK keyword is encountered
@@ -119,12 +120,11 @@ smtp_check_handler(__attribute__((unused)) const vector_t *strvec)
 	co->connection_to = UINT_MAX;
 
 	/* Have the checker queue code put our checker into the checkers_queue list. */
-	queue_checker(free_smtp_check, dump_smtp_check, smtp_start_check_thread,
-		      smtp_check_compare, smtp_checker, co, true);
+	queue_checker(&smtp_checker_funcs, smtp_start_check_thread, smtp_checker, co, true);
 
 	/* We need to be able to check if anything has been set */
 	co->dst.ss_family = AF_UNSPEC;
-	((struct sockaddr_in *)&co->dst)->sin_port = 0;
+	PTR_CAST(struct sockaddr_in, &co->dst)->sin_port = 0;
 }
 
 static void
@@ -153,9 +153,9 @@ smtp_check_end_handler(void)
 #ifdef WITH_HOST_ENTRIES
 	/* Have any of the connection parameters been set, or are there no hosts? */
 	if (checker->co->dst.ss_family != AF_UNSPEC ||
-	    ((struct sockaddr_in *)&checker->co->dst)->sin_port ||
+	    PTR_CAST(struct sockaddr_in, &checker->co->dst)->sin_port ||
 	    checker->co->bindto.ss_family != AF_UNSPEC ||
-	    ((struct sockaddr_in *)&checker->co->bindto)->sin_port ||
+	    PTR_CAST(struct sockaddr_in, &checker->co->bindto)->sin_port ||
 	    checker->co->bind_if[0] ||
 	    list_empty(&host_list) ||
 #ifdef _WITH_SO_MARK_
@@ -166,14 +166,14 @@ smtp_check_end_handler(void)
 	{
 		/* Set any necessary defaults. NOTE: we are relying on
 		 * struct sockaddr_in and sockaddr_in6 port offsets being the same. */
-		uint16_t saved_port = ((struct sockaddr_in*)&checker->co->dst)->sin_port;
+		uint16_t saved_port = PTR_CAST(struct sockaddr_in, &checker->co->dst)->sin_port;
 		if (checker->co->dst.ss_family == AF_UNSPEC) {
 			checker->co->dst = checker->rs->addr;
 			if (saved_port)
 				checker_set_dst_port(&checker->co->dst, saved_port);
 		}
 		if (!saved_port)
-			checker_set_dst_port(&checker->co->dst, ((struct sockaddr_in*)&checker->rs->addr)->sin_port);
+			checker_set_dst_port(&checker->co->dst, PTR_CAST(struct sockaddr_in, &checker->rs->addr)->sin_port);
 
 		if (!check_conn_opts(checker->co)) {
 			dequeue_new_checker();
@@ -211,8 +211,8 @@ smtp_check_end_handler(void)
 
 		new_smtp_checker->helo_name = STRDUP(smtp_checker->helo_name);
 
-		new_checker = queue_checker(free_smtp_check, dump_smtp_check, smtp_start_check_thread,
-				      smtp_check_compare, new_smtp_checker, NULL, true);
+		new_checker = queue_checker(&smtp_checker_funcs, smtp_start_check_thread,
+					      new_smtp_checker, NULL, true);
 
 		sav_e_list = new_checker->e_list;
 		*new_checker = *checker;

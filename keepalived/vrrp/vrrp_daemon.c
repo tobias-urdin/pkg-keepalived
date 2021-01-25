@@ -30,6 +30,7 @@
 #include <sys/prctl.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <fcntl.h>
 
 #ifdef THREAD_DUMP
 #ifdef _WITH_SNMP_
@@ -86,9 +87,13 @@
 #ifdef _WITH_LVS_
 #include "ipvswrapper.h"
 #endif
+#ifdef _USE_SYSTEMD_
+#include "systemd.h"
+#endif
 
 /* Global variables */
 bool non_existent_interface_specified;
+const char * const igmp_link_local_mcast_reports = "/proc/sys/net/ipv4/igmp_link_local_mcast_reports";
 
 /* Forward declarations */
 #ifndef _ONE_PROCESS_DEBUG_
@@ -105,6 +110,7 @@ perf_t perf_run = PERF_NONE;
 
 /* local variables */
 static const char *vrrp_syslog_ident;
+static char sav_igmp_link_local_mcast_reports;
 #ifndef __ONE_PROCESS_DEBUG_
 static bool two_phase_terminate;
 static timeval_t vrrp_start_time;
@@ -200,6 +206,53 @@ vrrp_ipvs_needed(void)
 }
 #endif
 
+static void
+set_disable_local_igmp(void)
+{
+	char buf;
+	int fd;
+	ssize_t len;
+
+	if ((fd = open(igmp_link_local_mcast_reports, O_RDWR)) == -1) {
+		log_message(LOG_INFO, "Unable to open %s - errno %d", igmp_link_local_mcast_reports, errno);
+		global_data->disable_local_igmp = false;
+		return;
+	}
+
+	if ((len = read(fd, &sav_igmp_link_local_mcast_reports, 1)) != 1) {
+		log_message(LOG_INFO, "Unable to read %s - errno %d", igmp_link_local_mcast_reports, errno);
+		global_data->disable_local_igmp = false;
+		close(fd);
+		return;
+	}
+
+	if (sav_igmp_link_local_mcast_reports == '1') {
+		buf = '0';
+		lseek(fd, 0, SEEK_SET);
+		if (write(fd, &buf, 1) != 1) {
+			log_message(LOG_INFO, "Unable to write %s - errno %d", igmp_link_local_mcast_reports, errno);
+			global_data->disable_local_igmp = false;
+			close(fd);
+			return;
+		}
+	}
+
+	close(fd);
+}
+
+static void
+reset_disable_local_igmp(void)
+{
+	int fd;
+
+	if (sav_igmp_link_local_mcast_reports == '1') {
+		fd = open(igmp_link_local_mcast_reports, O_RDWR);
+		if (write(fd, &sav_igmp_link_local_mcast_reports, 1) != -1)
+			log_message(LOG_INFO, "Unable to write %s - errno %d", igmp_link_local_mcast_reports, errno);
+		close(fd);
+	}
+}
+
 static int
 vrrp_terminate_phase2(int exit_status)
 {
@@ -258,8 +311,13 @@ vrrp_terminate_phase2(int exit_status)
 		dbus_stop();
 #endif
 
+	clear_rt_names();
+
 	if (global_data->vrrp_notify_fifo.fd != -1)
 		notify_fifo_close(&global_data->notify_fifo, &global_data->vrrp_notify_fifo);
+
+	if (global_data->disable_local_igmp)
+		reset_disable_local_igmp();
 
 	free_global_data(global_data);
 	free_vrrp_data(vrrp_data);
@@ -379,7 +437,7 @@ vrrp_terminate_phase1(bool schedule_next_thread)
 	/* Clear static entries */
 #ifdef _HAVE_FIB_ROUTING_
 	netlink_rulelist(&vrrp_data->static_rules, IPRULE_DEL, false);
-	netlink_rtlist(&vrrp_data->static_routes, IPROUTE_DEL);
+	netlink_rtlist(&vrrp_data->static_routes, IPROUTE_DEL, false);
 #endif
 	netlink_iplist(&vrrp_data->static_addresses, IPADDRESS_DEL, false);
 
@@ -460,7 +518,7 @@ start_vrrp(data_t *prev_global_data)
 		return;
 	}
 
-	init_data(conf_file, vrrp_init_keywords);
+	init_data(conf_file, vrrp_init_keywords, false);
 
 	/* Update process name if necessary */
 	if ((!reload && global_data->vrrp_process_name) ||
@@ -531,7 +589,7 @@ start_vrrp(data_t *prev_global_data)
 			/* Clear leftover static entries */
 			netlink_iplist(&vrrp_data->static_addresses, IPADDRESS_DEL, false);
 #ifdef _HAVE_FIB_ROUTING_
-			netlink_rtlist(&vrrp_data->static_routes, IPROUTE_DEL);
+			netlink_rtlist(&vrrp_data->static_routes, IPROUTE_DEL, false);
 			netlink_error_ignore = ENOENT;
 			netlink_rulelist(&vrrp_data->static_rules, IPRULE_DEL, true);
 			netlink_error_ignore = 0;
@@ -539,8 +597,21 @@ start_vrrp(data_t *prev_global_data)
 		}
 	}
 
+	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
+		/* Init & start the VRRP packet dispatcher */
+		if (!reload && global_data->vrrp_startup_delay) {
+			vrrp_delayed_start_time = timer_add_long(time_now, global_data->vrrp_startup_delay);
+			log_message(LOG_INFO, "Delaying startup for %g seconds", global_data->vrrp_startup_delay / TIMER_HZ_DOUBLE);
+		}
+		thread_add_event(master, vrrp_dispatcher_init, NULL, 0);
+
+		if (!reload && global_data->disable_local_igmp)
+			set_disable_local_igmp();
+	}
+
 	/* Complete VRRP initialization */
-	if (!vrrp_complete_init()) {
+	if (!vrrp_complete_init() ||
+	    (global_data->reload_check_config && get_config_status() != CONFIG_OK)) {
 		stop_vrrp(KEEPALIVED_EXIT_CONFIG);
 		return;
 	}
@@ -567,6 +638,9 @@ start_vrrp(data_t *prev_global_data)
 	if (reload) {
 		clear_diff_vrrp();
 		vrrp_dispatcher_release(old_vrrp_data);
+
+		/* Set previous sync group states to suppress duplicate notifies */
+		set_previous_sync_group_states();
 	}
 
 #ifdef _WITH_DBUS_
@@ -590,21 +664,13 @@ start_vrrp(data_t *prev_global_data)
 	/* Set static entries */
 	netlink_iplist(&vrrp_data->static_addresses, IPADDRESS_ADD, false);
 #ifdef _HAVE_FIB_ROUTING_
-	netlink_rtlist(&vrrp_data->static_routes, IPROUTE_ADD);
+	netlink_rtlist(&vrrp_data->static_routes, IPROUTE_ADD, false);
 	netlink_rulelist(&vrrp_data->static_rules, IPRULE_ADD, false);
 #endif
 
 	/* Dump configuration */
 	if (__test_bit(DUMP_CONF_BIT, &debug))
 		dump_data_vrrp(NULL);
-
-	/* Init & start the VRRP packet dispatcher */
-	if (!reload && global_data->vrrp_startup_delay) {
-		log_message(LOG_INFO, "Delaying startup for %g seconds", global_data->vrrp_startup_delay / TIMER_HZ_DOUBLE);
-		thread_add_timer(master, vrrp_dispatcher_init, NULL,
-				 global_data->vrrp_startup_delay);
-	} else
-		thread_add_event(master, vrrp_dispatcher_init, NULL, 0);
 
 	/* Set the process priority and non swappable if configured */
 	set_process_priorities(global_data->vrrp_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
@@ -798,7 +864,9 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 
 	/* free backup data */
 	free_vrrp_data(old_vrrp_data);
+	old_vrrp_data = NULL;
 	free_global_data(old_global_data);
+	old_global_data = NULL;
 
 	free_old_interface_queue();
 
@@ -844,7 +912,8 @@ vrrp_respawn_thread(thread_ref_t thread)
 	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
 		thread_add_terminate_event(thread->master);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "VRRP child process(%d) died: Respawning", thread->u.c.pid);
+		log_child_died("VRRP", thread->u.c.pid);
+
 		restart_delay = calc_restart_delay(&vrrp_start_time, &vrrp_next_restart_delay, "VRRP");
 		if (!restart_delay)
 			start_vrrp_child();
@@ -998,12 +1067,19 @@ start_vrrp_child(void)
 	/* Clear any child finder functions set in parent */
 	set_child_finder_name(NULL);
 
+	/* Create an independant file descriptor for the shared config file */
+	separate_config_file();
+
 	/* Child process part, write pidfile */
 	if (!pidfile_write(vrrp_pidfile, getpid())) {
 		/* Fatal error */
 		log_message(LOG_INFO, "VRRP child process: cannot write pidfile");
 		exit(0);
 	}
+
+#ifdef _USE_SYSTEMD_
+	systemd_unset_notify();
+#endif
 
 #ifdef _VRRP_FD_DEBUG_
 	if (do_vrrp_fd_debug)
@@ -1023,6 +1099,9 @@ start_vrrp_child(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	vrrp_signal_init();
+
+	/* Register emergency shutdown function */
+	register_shutdown_function(stop_vrrp);
 #endif
 
 	/* Start VRRP daemon */

@@ -18,7 +18,7 @@
 #
 # Keepalived OpenSource project.
 #
-# Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
+# Copyright (C) 2001-2020 Alexandre Cassen, <acassen@gmail.com>
 
 VPATH = @srcdir@
 am__is_gnu_make = { \
@@ -102,6 +102,8 @@ POST_UNINSTALL = :
 @CN_PROC_TRUE@am__append_8 = track_process.c
 @ONE_PROCESS_DEBUG_FALSE@am__append_9 = reload_monitor.o
 @ONE_PROCESS_DEBUG_FALSE@am__append_10 = reload_monitor.c
+@WITH_SYSTEMD_TRUE@am__append_11 = systemd.o
+@WITH_SYSTEMD_TRUE@am__append_12 = systemd.c
 subdir = keepalived/core
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
@@ -121,13 +123,14 @@ am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 = 
 libcore_a_AR = $(AR) $(ARFLAGS)
 libcore_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
-	$(am__append_5) $(am__append_7) $(am__append_9)
+	$(am__append_5) $(am__append_7) $(am__append_9) \
+	$(am__append_11)
 am_libcore_a_OBJECTS = main.$(OBJEXT) daemon.$(OBJEXT) \
 	pidfile.$(OBJEXT) layer4.$(OBJEXT) smtp.$(OBJEXT) \
 	global_data.$(OBJEXT) global_parser.$(OBJEXT) \
 	keepalived_netlink.$(OBJEXT)
 am__EXTRA_libcore_a_SOURCES_DIST = snmp.c namespaces.c libnl_link.c \
-	track_process.c reload_monitor.c
+	track_process.c reload_monitor.c systemd.c
 libcore_a_OBJECTS = $(am_libcore_a_OBJECTS)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
@@ -202,7 +205,9 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
+DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -224,6 +229,7 @@ KA_CFLAGS = @KA_CFLAGS@
 KA_CPPFLAGS = @KA_CPPFLAGS@
 KA_LDFLAGS = @KA_LDFLAGS@
 KA_LIBS = @KA_LIBS@
+KA_TMP_DIR = @KA_TMP_DIR@
 LDD = @LDD@
 LDFLAGS = @LDFLAGS@
 LIBOBJS = @LIBOBJS@
@@ -247,13 +253,14 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR = @RUN_DIR@
+RUN_DIR_ROOT = @RUN_DIR_ROOT@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SNMP_SERVICE = @SNMP_SERVICE@
 SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
+SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -312,9 +319,10 @@ libcore_a_SOURCES = main.c daemon.c pidfile.c layer4.c smtp.c \
 			  global_data.c global_parser.c keepalived_netlink.c
 
 libcore_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5) \
-	$(am__append_7) $(am__append_9)
+	$(am__append_7) $(am__append_9) $(am__append_11)
 EXTRA_libcore_a_SOURCES = $(am__append_2) $(am__append_4) \
-	$(am__append_6) $(am__append_8) $(am__append_10)
+	$(am__append_6) $(am__append_8) $(am__append_10) \
+	$(am__append_12)
 all: all-am
 
 .SUFFIXES:
@@ -375,6 +383,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/reload_monitor.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/smtp.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/snmp.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/systemd.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/track_process.Po@am__quote@
 
 .c.o:

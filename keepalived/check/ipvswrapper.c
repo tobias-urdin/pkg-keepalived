@@ -209,11 +209,11 @@ ipvs_syncd_cmd(int cmd, const struct lvs_syncd_config *config, int state, bool i
 				daemonrule.mcast_ttl = config->mcast_ttl;
 			if (config->mcast_group.ss_family == AF_INET) {
 				daemonrule.mcast_af = AF_INET;
-				daemonrule.mcast_group.ip = ((const struct sockaddr_in *)&config->mcast_group)->sin_addr.s_addr;
+				daemonrule.mcast_group.ip = PTR_CAST_CONST(struct sockaddr_in, &config->mcast_group)->sin_addr.s_addr;
 			}
 			else if (config->mcast_group.ss_family == AF_INET6) {
 				daemonrule.mcast_af = AF_INET6;
-				memcpy(&daemonrule.mcast_group.in6, &((const struct sockaddr_in6 *)&config->mcast_group)->sin6_addr, sizeof(daemonrule.mcast_group.in6));
+				memcpy(&daemonrule.mcast_group.in6, &PTR_CAST_CONST(struct sockaddr_in6, &config->mcast_group)->sin6_addr, sizeof(daemonrule.mcast_group.in6));
 			}
 #endif
 		}
@@ -317,7 +317,7 @@ set_vsge_alive(virtual_server_group_entry_t *vsge, const virtual_server_t *vs)
 	update_vsge_alive_count(vsge, vs, true);
 }
 
-static void
+void
 unset_vsge_alive(virtual_server_group_entry_t *vsge, const virtual_server_t *vs)
 {
 	update_vsge_alive_count(vsge, vs, false);
@@ -465,7 +465,7 @@ ipvs_set_drule(int cmd, ipvs_dest_t *drule, real_server_t * rs)
 		drule->nf_addr.ip = inet_sockaddrip4(&rs->addr);
 	drule->user.port = inet_sockaddrport(&rs->addr);
 	drule->user.conn_flags = rs->forwarding_method;
-	drule->user.weight = rs->weight;
+	drule->user.weight = real_weight(rs->effective_weight);
 	drule->user.u_threshold = rs->u_threshold;
 	drule->user.l_threshold = rs->l_threshold;
 #ifdef _HAVE_IPVS_TUN_TYPE_
@@ -549,7 +549,7 @@ ipvs_group_sync_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge)
 		if (rs->reloaded && (rs->alive || (rs->inhibit && rs->set))) {
 			/* Prepare the IPVS drule */
 			ipvs_set_drule(IP_VS_SO_SET_ADDDEST, &drule, rs);
-			drule.user.weight = rs->inhibit && !rs->alive ? 0 : rs->weight;
+			drule.user.weight = rs->inhibit && !rs->alive ? 0 : real_weight(rs->effective_weight);
 
 			/* Set vs rule */
 			if (vsge->is_fwmark) {
@@ -606,6 +606,8 @@ ipvs_group_remove_entry(virtual_server_t *vs, virtual_server_group_entry_t *vsge
 static inline bool
 vsd_equal(real_server_t *rs, struct ip_vs_dest_entry_app *entry)
 {
+	uint32_t port;
+
 	if (entry->af != AF_INET && entry->af != AF_INET6)
 		return false;
 
@@ -613,26 +615,27 @@ vsd_equal(real_server_t *rs, struct ip_vs_dest_entry_app *entry)
 		return false;
 
 	if (!inaddr_equal(entry->af, &entry->nf_addr,
-			entry->af == AF_INET ? (void *)&((struct sockaddr_in *)&rs->addr)->sin_addr
-					     : (void *)&((struct sockaddr_in6 *)&rs->addr)->sin6_addr))
+			entry->af == AF_INET ? (void *)&PTR_CAST(struct sockaddr_in, &rs->addr)->sin_addr
+					     : (void *)&PTR_CAST(struct sockaddr_in6, &rs->addr)->sin6_addr))
 		return false;
 
-	if (entry->user.port != (entry->af == AF_INET ? ((struct sockaddr_in *)&rs->addr)->sin_port
-						      : ((struct sockaddr_in6 *)&rs->addr)->sin6_port))
+	port = (entry->af == AF_INET ? PTR_CAST(struct sockaddr_in, &rs->addr)->sin_port
+				     : PTR_CAST(struct sockaddr_in6, &rs->addr)->sin6_port);
+	if (port && port != entry->user.port)
 		return false;
 
 	return true;
 }
 
 static void
-ipvs_update_vs_stats(virtual_server_t *vs, uint32_t fwmark, union nf_inet_addr *nfaddr, uint16_t port)
+ipvs_update_vs_stats(virtual_server_t *vs, uint16_t af, uint32_t fwmark, union nf_inet_addr *nfaddr, uint16_t port)
 {
 	struct ip_vs_get_dests_app *dests = NULL;
 	real_server_t *rs, *rs_match;
 	unsigned int i;
 	ipvs_service_entry_t *serv;
 
-	if (!(serv = ipvs_get_service(fwmark, vs->af, vs->service_type, nfaddr, port)))
+	if (!(serv = ipvs_get_service(fwmark, af, vs->service_type, nfaddr, port)))
 		return;
 
 	/* Update virtual server stats */
@@ -704,6 +707,7 @@ ipvs_update_stats(virtual_server_t *vs)
 	unsigned i;
 	real_server_t *rs;
 	time_t cur_time = time(NULL);
+	uint16_t af;
 
 	if (cur_time - vs->lastupdated < STATS_REFRESH)
 		return;
@@ -723,35 +727,37 @@ ipvs_update_stats(virtual_server_t *vs)
 
 	/* Update the stats */
 	if (vs->vsg) {
-		list_for_each_entry(vsg_entry, &vs->vsg->vfwmark, e_list)
-			ipvs_update_vs_stats(vs, vsg_entry->vfwmark, &nfaddr, 0);
+		for (af = (vs->vsg->have_ipv4) ? AF_INET : AF_INET6; af != AF_UNSPEC; af = af == AF_INET && vs->vsg->have_ipv6 ? AF_INET6 : AF_UNSPEC) {
+			list_for_each_entry(vsg_entry, &vs->vsg->vfwmark, e_list)
+				ipvs_update_vs_stats(vs, af, vsg_entry->vfwmark, &nfaddr, 0);
 
-		list_for_each_entry(vsg_entry, &vs->vsg->addr_range, e_list) {
-			addr_ip = (vsg_entry->addr.ss_family == AF_INET6) ?
-				    ntohs(((struct sockaddr_in6 *)&vsg_entry->addr)->sin6_addr.s6_addr16[7]) :
-				    ntohl(((struct sockaddr_in *)&vsg_entry->addr)->sin_addr.s_addr);
-			if (vsg_entry->addr.ss_family == AF_INET6)
-				inet_sockaddrip6(&vsg_entry->addr, &nfaddr.in6);
-
-			port = inet_sockaddrport(&vsg_entry->addr);
-			for (i = 0; i <= vsg_entry->range; i++, addr_ip++) {
+			list_for_each_entry(vsg_entry, &vs->vsg->addr_range, e_list) {
+				addr_ip = (vsg_entry->addr.ss_family == AF_INET6) ?
+					    ntohs(PTR_CAST(struct sockaddr_in6, &vsg_entry->addr)->sin6_addr.s6_addr16[7]) :
+					    ntohl(PTR_CAST(struct sockaddr_in, &vsg_entry->addr)->sin_addr.s_addr);
 				if (vsg_entry->addr.ss_family == AF_INET6)
-					nfaddr.in6.s6_addr16[7] = htons(addr_ip);
-				else
-					nfaddr.ip = htonl(addr_ip);
+					inet_sockaddrip6(&vsg_entry->addr, &nfaddr.in6);
 
-				ipvs_update_vs_stats(vs, 0, &nfaddr, port);
+				port = inet_sockaddrport(&vsg_entry->addr);
+				for (i = 0; i <= vsg_entry->range; i++, addr_ip++) {
+					if (vsg_entry->addr.ss_family == AF_INET6)
+						nfaddr.in6.s6_addr16[7] = htons(addr_ip);
+					else
+						nfaddr.ip = htonl(addr_ip);
+
+					ipvs_update_vs_stats(vs, af, 0, &nfaddr, port);
+				}
 			}
 		}
 	} else if (vs->vfwmark) {
 		memset(&nfaddr, 0, sizeof(nfaddr));
-		ipvs_update_vs_stats(vs, vs->vfwmark, &nfaddr, 0);
+		ipvs_update_vs_stats(vs, vs->af, vs->vfwmark, &nfaddr, 0);
 	} else {
-		memcpy(&nfaddr, (vs->addr.ss_family == AF_INET6)?
-		       (void*)(&((struct sockaddr_in6 *)&vs->addr)->sin6_addr):
-		       (void*)(&((struct sockaddr_in *)&vs->addr)->sin_addr),
+		memcpy(&nfaddr, (vs->addr.ss_family == AF_INET6) ?
+		       (void*)(&PTR_CAST(struct sockaddr_in6, &vs->addr)->sin6_addr) :
+		       (void*)(&PTR_CAST(struct sockaddr_in, &vs->addr)->sin_addr),
 		       sizeof(nfaddr));
-		ipvs_update_vs_stats(vs, 0, &nfaddr, inet_sockaddrport(&vs->addr));
+		ipvs_update_vs_stats(vs, vs->af, 0, &nfaddr, inet_sockaddrport(&vs->addr));
 	}
 }
 #endif /* _WITH_SNMP_CHECKER_ */

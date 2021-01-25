@@ -61,6 +61,9 @@
 #include "global_data.h"
 #include "list_head.h"
 #include "utils.h"
+#ifdef _HAVE_VRRP_VMAC_
+#include "vrrp_firewall.h"
+#endif
 
 
 /* nft supports ifnames in sets from commit 8c61fa7 (release v0.8.3, libnftnl v1.0.9 (but 0.8.2 also uses that, 0.8.4 uses v1.1.0)) */
@@ -102,7 +105,11 @@ enum udata_set_type {
 #define NO_REG (NFT_REG_MAX+1)
 
 #ifdef _HAVE_VRRP_VMAC_
+#if HAVE_DECL_NFTA_DUP_MAX
 static const char vmac_map_name[] = "vmac_map";
+#else
+static const char vmac_map_name[] = "vmac_set";
+#endif
 #endif
 
 static struct mnl_socket *nl;
@@ -126,7 +133,7 @@ static bool ipv6_igmp_setup;
 static int
 table_cb(const struct nlattr *attr, void *data)
 {
-	const struct nlattr **tb = (const struct nlattr **)data;
+	const struct nlattr **tb = PTR_CAST_CONST(struct nlattr *, data);
 
 	tb[attr->nla_type & NLA_TYPE_MASK] = attr;
 	return MNL_CB_OK;
@@ -206,10 +213,26 @@ exchange_nl_msg(struct mnl_nlmsg_batch *batch)
 		return;
 
 #if 0
-	FILE *fp = fopen("/tmp/nftrace", "a");
-	mnl_nlmsg_fprintf(fp, (char *)mnl_nlmsg_batch_head(batch), mnl_nlmsg_batch_size(batch), sizeof( struct nfgenmsg));
+	FILE *fp = fopen(KA_TMP_DIR "/nftrace", "a");
+	unsigned char *p = mnl_nlmsg_batch_head(batch);
+	size_t i;
+
+	fprintf(fp, "mnl_nlmsg_batch_size %zu\n", mnl_nlmsg_batch_size(batch));
+	for (i = 0; i < mnl_nlmsg_batch_size(batch); i++, p++) {
+		if (!(i % 16))
+			fprintf(fp, "%4.4zx:  ", i);
+		fprintf(fp, " %2.2x", *p);
+		if (i % 16 == 15)
+			fprintf(fp, "\n");
+	}
+
+	if (!(i % 16))
+		fprintf(fp, "\n");
+
+	mnl_nlmsg_fprintf(fp, PTR_CAST(char, mnl_nlmsg_batch_head(batch)), mnl_nlmsg_batch_size(batch), sizeof( struct nfgenmsg));
 	fclose(fp);
 #endif
+
 	if (!nl && !nl_socket_open())
 		return;
 
@@ -240,20 +263,20 @@ exchange_nl_msg(struct mnl_nlmsg_batch *batch)
 static int
 table_cb(__attribute__((unused)) const struct nlmsghdr *nlh, void *data)
 {
-	*(bool *)data = true;
+	*PTR_CAST(bool, data) = true;
 
 	return MNL_CB_OK;
 }
 
 static void
-exchange_nl_msg_single(struct nlmsghdr *nlm, int (*cb_func)(const struct nlmsghdr *, void*), bool *success)
+exchange_nl_msg_single(struct nlmsghdr *nlm, int (*cb_func)(const struct nlmsghdr *, void *), bool *success)
 {
 	int ret;
 	char buf[256];
 
 #if 0
-	FILE *fp = fopen("/tmp/nftrace", "a");
-	mnl_nlmsg_fprintf(fp, (char *)nlm, nlm->nlmsg_len, 0);
+	FILE *fp = fopen(KA_TMP_DIR "/nftrace", "a");
+	mnl_nlmsg_fprintf(fp, PTR_CAST(char, nlm), nlm->nlmsg_len, 0);
 	fclose(fp);
 #endif
 
@@ -371,7 +394,7 @@ add_dup(struct nftnl_rule *r, uint32_t addr_reg, uint32_t dev_reg)
 }
 #endif
 
-/* verdict shoud be NF_DROP, NF_ACCEPT, NFT_RETURN, ... */
+/* verdict should be NF_DROP, NF_ACCEPT, NFT_RETURN, ... */
 /* "The nf_tables verdicts share their numeric space with the netfilter verdicts." */
 static void
 add_immediate_verdict(struct nftnl_rule *r, uint32_t verdict, const char *chain)
@@ -392,7 +415,7 @@ add_immediate_verdict(struct nftnl_rule *r, uint32_t verdict, const char *chain)
 	nftnl_rule_add_expr(r, e);
 }
 
-#if HAVE_DECL_NFTA_DUP_MAX && defined _HAVE_VRRP_VMAC_
+#ifdef _INCLUDE_UNUSED_CODE_
 static void
 add_immediate_data(struct nftnl_rule *r, uint32_t reg, const void *data, uint32_t data_len)
 {
@@ -405,7 +428,7 @@ add_immediate_data(struct nftnl_rule *r, uint32_t reg, const void *data, uint32_
 	}
 
 	nftnl_expr_set_u32(e, NFTNL_EXPR_IMM_DREG, reg);
-	nftnl_expr_set(e, NFTNL_EXPR_IMM_DATA, data, data_len);
+	nftnl_expr_set_data(e, NFTNL_EXPR_IMM_DATA, data, data_len);
 
 	nftnl_rule_add_expr(r, e);
 }
@@ -425,7 +448,7 @@ add_cmp(struct nftnl_rule *r, uint32_t sreg, uint32_t op,
 
 	nftnl_expr_set_u32(e, NFTNL_EXPR_CMP_SREG, sreg);
 	nftnl_expr_set_u32(e, NFTNL_EXPR_CMP_OP, op);
-	nftnl_expr_set(e, NFTNL_EXPR_CMP_DATA, data, data_len);
+	nftnl_expr_set_data(e, NFTNL_EXPR_CMP_DATA, data, data_len);
 
 	nftnl_rule_add_expr(r, e);
 }
@@ -445,8 +468,8 @@ add_bitwise(struct nftnl_rule *r, uint32_t sreg, uint32_t dreg,
 	nftnl_expr_set_u32(e, NFTA_BITWISE_SREG, sreg);
 	nftnl_expr_set_u32(e, NFTA_BITWISE_DREG, dreg);
 	nftnl_expr_set_u32(e, NFTA_BITWISE_LEN, len);
-	nftnl_expr_set(e, NFTA_BITWISE_MASK, mask, len);
-	nftnl_expr_set(e, NFTA_BITWISE_XOR, xor, len);
+	nftnl_expr_set_data(e, NFTA_BITWISE_MASK, mask, len);
+	nftnl_expr_set_data(e, NFTA_BITWISE_XOR, xor, len);
 
 	nftnl_rule_add_expr(r, e);
 }
@@ -594,20 +617,19 @@ nftnl_set *setup_set(uint8_t family, const char *table,
 	nftnl_set_set_u32(s, NFTNL_SET_ID, ++set_id);
 
 #ifdef HAVE_NFTNL_UDATA
-	if (set_type & NFT_SET_MAP) {
-		udbuf = nftnl_udata_buf_alloc(NFT_USERDATA_MAXLEN);
-		if (!udbuf) {
-			log_message(LOG_INFO, "OOM error - %d", errno);
-			return NULL;
-		}
+	udbuf = nftnl_udata_buf_alloc(NFT_USERDATA_MAXLEN);
+	if (!udbuf) {
+		log_message(LOG_INFO, "OOM error - %d", errno);
+		return NULL;
+	}
 
-		nftnl_udata_put_u32(udbuf, NFTNL_UDATA_SET_KEYBYTEORDER, BYTEORDER_HOST_ENDIAN);
+	nftnl_udata_put_u32(udbuf, NFTNL_UDATA_SET_KEYBYTEORDER, type == TYPE_IPADDR || type == TYPE_IP6ADDR ? BYTEORDER_BIG_ENDIAN : BYTEORDER_HOST_ENDIAN);
+	if (set_type & NFT_SET_MAP)
 		nftnl_udata_put_u32(udbuf, NFTNL_UDATA_SET_DATABYTEORDER, BYTEORDER_HOST_ENDIAN);
 
-		nftnl_set_set_data(s, NFTNL_SET_USERDATA, nftnl_udata_buf_data(udbuf),
-				   nftnl_udata_buf_len(udbuf));
-		nftnl_udata_buf_free(udbuf);
-	}
+	nftnl_set_set_data(s, NFTNL_SET_USERDATA, nftnl_udata_buf_data(udbuf),
+			   nftnl_udata_buf_len(udbuf));
+	nftnl_udata_buf_free(udbuf);
 #endif
 
 	return s;
@@ -1639,7 +1661,7 @@ nft_update_ipv6_address(struct mnl_nlmsg_batch *batch, ip_address_t *addr, bool 
 }
 
 static void
-nft_update_addresses(vrrp_t *vrrp, int cmd)
+nft_update_addresses(const vrrp_t *vrrp, int cmd)
 {
 	struct mnl_nlmsg_batch *batch;
 	struct nlmsghdr *nlh;
@@ -1648,75 +1670,45 @@ nft_update_addresses(vrrp_t *vrrp, int cmd)
 	struct nftnl_set *ipv6_set = NULL;
 	struct nftnl_set *ipv6_ll_index_set = NULL;
 	struct nftnl_set *ipv6_ll_name_set = NULL;
+	struct nftnl_set **ip_set;
 	bool set_rule = (cmd == NFT_MSG_NEWSETELEM);
 	uint16_t type = (cmd == NFT_MSG_NEWSETELEM) ? NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK : NLM_F_ACK;
+	const list_head_t *vip_list;
+	int proto;
 
 	batch = nft_start_batch();
 
-	list_for_each_entry(ip_addr, &vrrp->vip, e_list) {
-		if (set_rule == ip_addr->nftable_rule_set)
-			continue;
+	for (vip_list = &vrrp->vip; vip_list; vip_list = vip_list == &vrrp->vip ? &vrrp->evip : NULL) {
+		list_for_each_entry(ip_addr, vip_list, e_list) {
+			if (set_rule == ip_addr->nftable_rule_set)
+				continue;
 
-		if (ip_addr->ifa.ifa_family == AF_INET)
-			nft_update_ipv4_address(batch, ip_addr, &ipv4_set);
-		else
-			nft_update_ipv6_address(batch, ip_addr, vrrp->dont_track_primary, vrrp->ifp,
-					&ipv6_set, &ipv6_ll_index_set, &ipv6_ll_name_set);
+			if (ip_addr->ifa.ifa_family == AF_INET)
+				nft_update_ipv4_address(batch, ip_addr, &ipv4_set);
+			else
+				nft_update_ipv6_address(batch, ip_addr, vrrp->dont_track_primary, vrrp->ifp,
+						&ipv6_set, &ipv6_ll_index_set, &ipv6_ll_name_set);
 
-		ip_addr->nftable_rule_set = set_rule;
+			ip_addr->nftable_rule_set = set_rule;
+		}
 	}
 
-	list_for_each_entry(ip_addr, &vrrp->evip, e_list) {
-		if (set_rule == ip_addr->nftable_rule_set)
-			continue;
+	for (ip_set = &ipv4_set, proto = NFPROTO_IPV4; ip_set;
+	     ip_set = 
+		ip_set == &ipv4_set ? &ipv6_set :
+		ip_set == &ipv6_set ? &ipv6_ll_index_set :
+		ip_set == &ipv6_ll_index_set ? &ipv6_ll_name_set : NULL) {
+		if (*ip_set) {
+			nlh = nftnl_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
+						    cmd, proto,
+						    type,
+						    seq++);
+			nftnl_set_elems_nlmsg_build_payload(nlh, *ip_set);
+			nftnl_set_free(*ip_set);
+			my_mnl_nlmsg_batch_next(batch);
+		}
 
-		if (ip_addr->ifa.ifa_family == AF_INET)
-			nft_update_ipv4_address(batch, ip_addr, &ipv4_set);
-		else
-			nft_update_ipv6_address(batch, ip_addr, vrrp->dont_track_primary, vrrp->ifp,
-					&ipv6_set, &ipv6_ll_index_set, &ipv6_ll_name_set);
-
-		ip_addr->nftable_rule_set = set_rule;
-	}
-
-	if (ipv4_set) {
-		nlh = nftnl_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
-					    cmd, NFPROTO_IPV4,
-					    type,
-					    seq++);
-		nftnl_set_elems_nlmsg_build_payload(nlh, ipv4_set);
-		nftnl_set_free(ipv4_set);
-		my_mnl_nlmsg_batch_next(batch);
-	}
-
-	if (ipv6_set) {
-		nlh = nftnl_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
-					    cmd, NFPROTO_IPV6,
-					    type,
-					    seq++);
-		nftnl_set_elems_nlmsg_build_payload(nlh, ipv6_set);
-		nftnl_set_free(ipv6_set);
-		my_mnl_nlmsg_batch_next(batch);
-	}
-
-	if (ipv6_ll_index_set) {
-		nlh = nftnl_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
-					    cmd, NFPROTO_IPV6,
-					    type,
-					    seq++);
-		nftnl_set_elems_nlmsg_build_payload(nlh, ipv6_ll_index_set);
-		nftnl_set_free(ipv6_ll_index_set);
-		my_mnl_nlmsg_batch_next(batch);
-	}
-
-	if (ipv6_ll_name_set) {
-		nlh = nftnl_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
-					    cmd, NFPROTO_IPV6,
-					    type,
-					    seq++);
-		nftnl_set_elems_nlmsg_build_payload(nlh, ipv6_ll_name_set);
-		nftnl_set_free(ipv6_ll_name_set);
-		my_mnl_nlmsg_batch_next(batch);
+		proto = NFPROTO_IPV6;
 	}
 
 	nft_end_batch(batch, false);
@@ -1738,9 +1730,16 @@ nft_remove_addresses(vrrp_t *vrrp)
 void
 nft_remove_addresses_iplist(list_head_t *l)
 {
-	vrrp_t vrrp = { .vip = *l };
+	vrrp_t vrrp = {};
+
+	/* "Borrow" the list of addresses */
+	list_copy(&vrrp.vip, l);
+	INIT_LIST_HEAD(&vrrp.evip);
 
 	nft_update_addresses(&vrrp, NFT_MSG_DELSETELEM);
+
+	/* Restore the list of addresses */
+	list_copy(l, &vrrp.vip);
 }
 
 #ifdef _HAVE_VRRP_VMAC_
@@ -1750,14 +1749,16 @@ static struct nftnl_rule
 				   const char *set_map)
 {
 	/* If have nft dup statement:
-	     nft add rule ip keepalived out ip daddr 224.0.0.22 dup to 224.0.0.22 device oifname map @imap drop
+	     nft add rule ip keepalived out ip protocol igmp dup to ip daddr device oif map @vmac_map drop
+	     nft add rule ip6 keepalived out icmpv6 type mld2-listener-report dup to ip6 daddr device oif map @vmac_map drop
 	   otherwise:
-	     nft add rule ip keepalived out ip daddr 224.0.0.22 oifname @imap drop
+	     nft add rule ip keepalived out ip protocol igmp oif @vmac_set drop
+	     nft add rule ip6 keepalived out icmpv6 type mld2-listener-report oif @vmac_set drop
 	 */
 	struct nftnl_rule *r = NULL;
-	struct in_addr ip;
-	struct in6_addr ip6;
 	uint64_t handle_num;
+	uint8_t protocol;
+	struct icmp6_hdr icmp6;
 
 	r = nftnl_rule_alloc();
 	if (r == NULL) {
@@ -1776,23 +1777,25 @@ static struct nftnl_rule
 
 	if (family == NFPROTO_IPV4) {
 		add_payload(r, NFT_PAYLOAD_NETWORK_HEADER, NFT_REG_1,
-			    offsetof(struct iphdr, daddr), sizeof(struct in_addr));
+			    offsetof(struct iphdr, protocol), sizeof(uint8_t));
 
-		ip.s_addr = htonl(0xe0000016);
-		add_cmp(r, NFT_REG_1, NFT_CMP_EQ, &ip, sizeof(ip));
+		protocol = IPPROTO_IGMP;
+		add_cmp(r, NFT_REG_1, NFT_CMP_EQ, &protocol, sizeof(protocol));
 #if HAVE_DECL_NFTA_DUP_MAX
-		add_immediate_data(r, NFT_REG_1, &ip, sizeof(ip));
+		add_payload(r, NFT_PAYLOAD_NETWORK_HEADER, NFT_REG_1,
+			    offsetof(struct iphdr, daddr), sizeof(struct in_addr));
 #endif
 	} else {
+		add_meta(r, NFT_META_L4PROTO, NFT_REG_1);
+		protocol = IPPROTO_ICMPV6;
+		add_cmp(r, NFT_REG_1, NFT_CMP_EQ, &protocol, sizeof(protocol));
+		add_payload(r, NFT_PAYLOAD_TRANSPORT_HEADER, NFT_REG_1,
+			    offsetof(struct icmp6_hdr, icmp6_type), sizeof(icmp6.icmp6_type));
+		icmp6.icmp6_type = ICMPV6_MLD2_REPORT;
+		add_cmp(r, NFT_REG_1, NFT_CMP_EQ, &icmp6.icmp6_type, sizeof(icmp6.icmp6_type));
+#if HAVE_DECL_NFTA_DUP_MAX
 		add_payload(r, NFT_PAYLOAD_NETWORK_HEADER, NFT_REG_1,
 			    offsetof(struct ip6_hdr, ip6_dst), sizeof(struct in6_addr));
-
-		ip6.s6_addr32[0] = htonl(0xff020000);
-		ip6.s6_addr32[1] = ip6.s6_addr32[2] = 0;
-		ip6.s6_addr32[3] = htonl(0x00000016);
-		add_cmp(r, NFT_REG_1, NFT_CMP_EQ, &ip6, sizeof(ip6));
-#if HAVE_DECL_NFTA_DUP_MAX
-		add_immediate_data(r, NFT_REG_1, &ip6, sizeof(ip6));
 #endif
 	}
 
@@ -1863,7 +1866,7 @@ nft_update_vmac_element(struct mnl_nlmsg_batch *batch, struct nftnl_set *s, ifin
 	struct nftnl_set_elem *e;
 	uint16_t type = cmd == NFT_MSG_NEWSETELEM ? NLM_F_CREATE | NLM_F_ACK : NLM_F_ACK;
 
-	/* nft add element ip keepalived imap { "vrrp.253", "eth0" } */
+	/* nft add element ip keepalived vmac_map { "vrrp.253", "eth0" } */
 	nlh = nftnl_set_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
 				      cmd, nfproto,
 				      type, seq++);
@@ -1879,7 +1882,7 @@ nft_update_vmac_element(struct mnl_nlmsg_batch *batch, struct nftnl_set *s, ifin
 }
 
 static void
-nft_update_vmac_family(struct mnl_nlmsg_batch *batch, const vrrp_t *vrrp, uint8_t nfproto, int cmd)
+nft_update_vmac_family(struct mnl_nlmsg_batch *batch, const interface_t *ifp, uint8_t nfproto, int cmd)
 {
 	struct nftnl_set *s;
 
@@ -1897,37 +1900,37 @@ nft_update_vmac_family(struct mnl_nlmsg_batch *batch, const vrrp_t *vrrp, uint8_
 		nftnl_set_set_str(s, NFTNL_SET_NAME, vmac_map_name);
 	}
 
-	nft_update_vmac_element(batch, s, vrrp->ifp->ifindex, vrrp->ifp->base_ifp->ifindex, cmd, nfproto);
+	nft_update_vmac_element(batch, s, ifp->ifindex, ifp->base_ifp->ifindex, cmd, nfproto);
 
 	nftnl_set_free(s);
 }
 
 static void
-nft_update_vmac(const vrrp_t *vrrp, int cmd)
+nft_update_vmac(const interface_t *ifp, int family, bool other_family, int cmd)
 {
 	struct mnl_nlmsg_batch *batch;
-	uint8_t nfproto = vrrp->family == AF_INET ? NFPROTO_IPV4 : NFPROTO_IPV6;
+	uint8_t nfproto = family == AF_INET ? NFPROTO_IPV4 : NFPROTO_IPV6;
 
 	batch = nft_start_batch();
 
-	nft_update_vmac_family(batch, vrrp, nfproto, cmd);
+	nft_update_vmac_family(batch, ifp, nfproto, cmd);
 
-	if (vrrp->evip_other_family)
-		nft_update_vmac_family(batch, vrrp, nfproto == NFPROTO_IPV4 ? NFPROTO_IPV6 : NFPROTO_IPV4, cmd);
+	if (other_family)
+		nft_update_vmac_family(batch, ifp, nfproto == NFPROTO_IPV4 ? NFPROTO_IPV6 : NFPROTO_IPV4, cmd);
 
 	nft_end_batch(batch, false);
 }
 
 void
-nft_add_vmac(const vrrp_t *vrrp)
+nft_add_vmac(const interface_t *ifp, int family, bool other_family)
 {
-	nft_update_vmac(vrrp, NFT_MSG_NEWSETELEM);
+	nft_update_vmac(ifp, family, other_family, NFT_MSG_NEWSETELEM);
 }
 
 void
-nft_remove_vmac(const vrrp_t *vrrp)
+nft_remove_vmac(const interface_t *ifp, int family, bool other_family)
 {
-	nft_update_vmac(vrrp, NFT_MSG_DELSETELEM);
+	nft_update_vmac(ifp, family, other_family, NFT_MSG_DELSETELEM);
 }
 #endif
 

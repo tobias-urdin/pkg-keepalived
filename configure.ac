@@ -94,7 +94,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [2.1.5], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [2.2.1], [keepalived-users@groups.io], [], [http://www.keepalived.org/])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
@@ -122,8 +122,8 @@ AC_CONFIG_FILES([Makefile keepalived/Makefile lib/Makefile keepalived/core/Makef
 		 genhash/Makefile keepalived/check/Makefile keepalived/vrrp/Makefile \
 		 keepalived/bfd/Makefile doc/Makefile bin_install/Makefile keepalived/dbus/Makefile \
 		 keepalived/etc/Makefile keepalived/etc/init/Makefile keepalived/etc/init.d/Makefile \
-		 keepalived/trackers/Makefile \
-		 doc/man/man8/Makefile])
+		 keepalived/etc/keepalived/Makefile keepalived/trackers/Makefile \
+		 doc/man/man8/Makefile doc/man/man5/Makefile doc/man/man1/Makefile])
 
 
 MAINTAINERCLEANFILES="*~ *.orig *.rej core core.*"
@@ -214,9 +214,14 @@ AC_ARG_ENABLE(libnl,
   [AS_HELP_STRING([--disable-libnl], [compile without libnl])])
 AC_ARG_ENABLE(track-process,
   [AS_HELP_STRING([--disable-track-process], [build without track-process functionality])])
+AC_ARG_ENABLE(systemd,
+  [AS_HELP_STRING([--disable-systemd], [build without systemd integration])])
 AC_ARG_WITH(run-dir,
   [AS_HELP_STRING([--with-run-dir=PATH_TO_RUN], [specify directory where /run is located])],
   [RUN_DIR_SPECIFIED=Y], [RUN_DIR_SPECIFIED=N])
+AC_ARG_WITH(tmp-dir,
+  [AS_HELP_STRING([--with-tmp-dir=PATH_TO_TMP], [specify directory where run-time temporary files are to be located])],
+  [TMP_DIR_SPECIFIED=Y], [TMP_DIR_SPECIFIED=N])
 AC_ARG_ENABLE(strict-config-checks,
   [AS_HELP_STRING([--enable-strict-config-checks], [build with strict configuration checking])])
 AC_ARG_ENABLE(hardening,
@@ -257,6 +262,8 @@ AC_ARG_ENABLE(tsm-debug,
   [AS_HELP_STRING([--enable-tsm-debug], [compile with TSM debugging support])])
 AC_ARG_ENABLE(vrrp-fd-debug,
   [AS_HELP_STRING([--enable-vrrp-fd-debug], [compile with vrrp fd debugging support])])
+AC_ARG_ENABLE(recvmsg-debug,
+  [AS_HELP_STRING([--enable-recvmsg-debug], [compile with recvmsg() debugging support])])
 AC_ARG_ENABLE(eintr-debug,
   [AS_HELP_STRING([--enable-eintr-debug], [compile with EINTR debugging support, set to check/not check for EINTR])])
 AC_ARG_ENABLE(track-process-debug,
@@ -290,6 +297,13 @@ AC_ARG_WITH(default-config-file,
   [default_config_file="$withval"], [default_config_file=""])
 AC_ARG_ENABLE(profile,
   [AS_HELP_STRING([--enable-profile], [compile with profiling flags])])
+AC_ARG_ENABLE(strict-cast-align,
+  [AS_HELP_STRING([--enable-strict-cast-align], [compile with strict cast alignment warnings])])
+AC_ARG_ENABLE(cast-align-checks,
+  [AS_HELP_STRING([--enable-cast-align-checks], [runtime cast alignment checks])])
+AC_ARG_ENABLE(cast-via-void,
+  [AS_HELP_STRING([--enable-cast-via-void], [enable pointer cast via void * (default if warns without)])]
+[AS_HELP_STRING([--disable-cast-via-void], [disable pointer cast via void * (default if does not warn without)])])
 AC_ARG_ENABLE(conversion-checks,
   [AS_HELP_STRING([--enable-conversion-checks], [compile with conversion warnings if sensible])])
 AC_ARG_ENABLE(force-conversion-checks,
@@ -361,7 +375,7 @@ dnl -- Unused warnings - traditional
 MAX_FRAME_SIZE=5120
 WARNINGS_BASIC="all extra unused strict-prototypes"
 WARNINGS_STD="absolute-value address-of-packed-member alloca alloc-zero array-bounds=2 attribute-alias bad-function-cast cast-align cast-qual chkp date-time disabled-optimization double-promotion duplicated-branches duplicated-cond float-conversion float-equal format-overflow format-security format-signedness format-truncation frame-larger-than=$MAX_FRAME_SIZE implicit-fallthrough=3 init-self inline jump-misses-init logical-op missing-declarations missing-field-initializers missing-prototypes nested-externs normalized null-dereference old-style-definition overlength-strings pointer-arith redundant-decls shadow shift-overflow=2 stack-protector strict-overflow=4 strict-prototypes stringop-overflow=2 suggest-attribute=cold suggest-attribute=const suggest-attribute=format suggest-attribute=malloc suggest-attribute=noreturn suggest-attribute=pure sync-nand trampolines undef uninitialized unknown-pragmas unsuffixed-float-constants unused-const-variable=2 unused-macros variadic-macros write-strings"
-WARNINGS_EXTRA="aggregate-return cast-align= strict conversion format-nonliteral format-overflow=2 format-truncation=2 padded pedantic sign-conversion stack-usage=$MAX_FRAME_SIZE strict-overflow=5 stringop-overflow=3 stringop-overflow=4 switch-enum system-headers traditional-conversion"
+WARNINGS_EXTRA="aggregate-return cast-align=strict conversion format-nonliteral format-overflow=2 format-truncation=2 padded pedantic sign-conversion stack-usage=$MAX_FRAME_SIZE strict-overflow=5 stringop-overflow=3 stringop-overflow=4 switch-enum system-headers traditional-conversion"
 
 # We want _GNU_SOURCE defined always
 add_to_var([CPPFLAGS], [-D_GNU_SOURCE])
@@ -378,6 +392,7 @@ AS_IF([test .$enable_vrrp = .no],
     AS_IF([test $with_fixed_if_type], [AC_MSG_ERROR([with-fixed-if-type requires vrrp])])
     AS_IF([test .$enable_vrrp_fd_debug != .], [AC_MSG_ERROR([enable-vrrp-fd-debug requires vrrp])])
     AS_IF([test .$enable_tsm_debug != .], [AC_MSG_ERROR([enable-tsm-debug requires vrrp])])
+    AS_IF([test .$enable_recvmsg_debug != .], [AC_MSG_ERROR([enable-recvmsg-debug requires vrrp])])
     AS_IF([test .$enable_json != .], [AC_MSG_ERROR([enable-json requires vrrp])])
     AS_IF([test .$enable_snmp_vrrp != .], [AC_MSG_ERROR([enable-snmp-vrrp requires vrrp])])
     AS_IF([test .$enable_snmp_keepalived != .], [AC_MSG_ERROR([enable-snmp-keepalived requires vrrp])])
@@ -451,6 +466,7 @@ AS_IF([test .$enable_debug = .yes],
       [
 	AS_IF([test .$enable_vrrp_fd_debug = .], [enable_vrrp_fd_debug=yes])
 	AS_IF([test .$enable_tsm_debug = .], [enable_tsm_debug=yes])
+	AS_IF([test .$enable_recvmsg_debug = .], [enable_recvmsg_debug=yes])
 	AS_IF([test .$enable_track_process_debug = .], [enable_track_process_debug=yes])
 	AS_IF([test .$enable_checksum_debug = .], [enable_checksum_debug=yes])
 	AS_IF([test .$enable_netlink_timers = .], [enable_netlink_timers=yes])
@@ -472,6 +488,10 @@ AS_IF([test .$enable_debug = .yes],
 	AS_IF([test .$enable_mem_err_debug = .], [enable_mem_err_debug=yes])
       ])
   ])
+
+dnl -- Do we want -Wcast-align=strict?
+AS_IF([test .$enable_strict_cast_align = .yes],
+      [WARNINGS_STD=$(echo $WARNINGS_STD | sed -e "s/cast-align /cast-align=strict /")])
 
 dnl -- ulibc/glibc differences
 AC_MSG_CHECKING([msghdr.msg_controllen is size_t])
@@ -844,6 +864,47 @@ AC_RUN_IFELSE(
   ]
  )
 
+# Check if unaligned memory access creates warnings
+AC_MSG_CHECKING([for unaligned memory access causes warnings])
+UNALIGNED_ACCESS_WARNED=0
+SAV_CFLAGS="$CFLAGS"
+CFLAGS=$(echo $KA_CFLAGS | sed -e "s/.*\(-Wcast-align[[^ ]]*\) .*/\1/")
+CFLAGS="$CFLAGS -Werror"
+AC_COMPILE_IFELSE(
+  [
+    AC_LANG_PROGRAM(
+      [],
+      [[
+        char c;
+	int i = *(int *)&c;
+      ]]
+    )
+  ],
+  [AC_MSG_RESULT([no])],
+  [
+    AC_MSG_RESULT([yes])
+    UNALIGNED_ACCESS_WARNED=1
+  ],
+  [
+    AC_MSG_RESULT([unknown])
+    AC_MSG_WARN([Cannot determine if unaligned access supported. Assuming yes.])
+  ]
+ )
+CFLAGS="$SAV_CFLAGS"
+
+dnl - Do we want/need to cat via a void *?
+AS_IF([test .$enable_cast_via_void = .no],
+  [],
+  [
+    AS_IF([test .$enable_cast_via_void = .yes -o $UNALIGNED_ACCESS_WARNED -eq 1],
+      AC_DEFINE([CAST_VIA_VOID], [ 1 ], [Define to 1 to cast via void *]))
+  ]
+)
+
+dnl -- Runtime check cast alignments?
+AS_IF([test .$enable_cast_align_checks = .yes],
+      AC_DEFINE([CHECK_CAST_ALIGN], [ 1 ], [Define to 1 to do runtime cast alignment checks]))
+
 # Checks for libraries.
 dnl clock_gettime() required -lt before glibc 2.17
 AC_MSG_CHECKING([for clock_gettime() requires -lrt])
@@ -958,7 +1019,8 @@ AC_FUNC_FORK
 # We add malloc and realloc to AC_CHECK_FUNCS instead.
 #AC_FUNC_MALLOC
 #AC_FUNC_REALLOC
-AC_CHECK_FUNCS([dup2 getcwd gettimeofday malloc memmove memset realloc select setenv socket strcasecmp strchr strdup strerror strpbrk strstr strtol strtoul uname])
+dnl - dup3 since Linux 2.6.27 and glibc 2.9
+AC_CHECK_FUNCS([dup2 dup3 getcwd gettimeofday malloc memmove memset realloc select setenv socket strcasecmp strchr strdup strerror strpbrk strstr strtol strtoul uname])
 dnl - pipe2() since Linux 2.6.27 and glibc 2.9.
 AC_CHECK_FUNCS([pipe2], [add_system_opt([PIPE2])])
 dnl - signalfd() since Linux 2.6.22 and glibc 2.8
@@ -969,6 +1031,20 @@ dnl - vsyslog() Not defined by Posix, but available in glibc and musl
 AC_CHECK_FUNCS([vsyslog], [add_system_opt([VSYSLOG])])
 dnl - epoll_create1() since Linux 2.6.27 and glibc 2.9
 AC_CHECK_FUNCS([epoll_create1], [add_system_opt([EPOLL_CREATE1])])
+
+dnl - memfd_create() - since Linux 3.17 and glibc 2.27
+dnl - memfd_create() appeared in the kernel long before it appeared in
+dnl -   glibc so we use the raw syscall if it is available
+AC_CHECK_FUNCS([memfd_create], [add_system_opt([MEMFD_CREATE])])
+AS_IF([test "x$ac_cv_func_memfd_create" != xyes],
+  [
+    AC_CHECK_DECLS([__NR_memfd_create],
+      [AC_DEFINE([USE_MEMFD_CREATE_SYSCALL], [ 1 ], [Use syscall for memfd_create])], [],
+      [[#include <sys/syscall.h>]])
+  ])
+
+dnl - Since Linux 3.17
+AC_CHECK_DECLS([O_TMPFILE], [], [], [[#include <fcntl.h>]])
 
 # glibc uses unsigned int as 3rd parameter to __assert_fail(), musl uses int.
 AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
@@ -1721,6 +1797,27 @@ unset LIBS
 AS_IF([test $USE_IPTABLES = Yes -o $USE_NFTABLES = Yes], [AC_DEFINE([_WITH_FIREWALL_], [ 1 ], [Define to 1 if using iptables or nftables])])
 AM_CONDITIONAL([FIREWALL], [test $USE_IPTABLES = Yes -o $USE_NFTABLES = Yes])
 
+dnl ----[Check for systemd libraries]----
+USE_SYSTEMD=No
+SYSTEMD_SERVICE_TYPE=forking
+AS_IF([test .${enable_systemd} != .no],
+ [
+  $PKG_CONFIG --exists libsystemd
+  AS_IF([test $? -eq 0],
+   [
+    USE_SYSTEMD=Yes
+    add_pkg_config([libsystemd])
+    AC_DEFINE([_USE_SYSTEMD_], [ 1 ], [Define to 1 if want systemd support])
+    add_config_opt([SYSTEMD])
+    SYSTEMD_SERVICE_TYPE="notify\\nNotifyAccess=all"
+   ],
+   [
+    AS_IF([test .${enable_systemd} = .yes], [AC_MSG_WARN([libsystemd missing])])
+   ])
+ ])
+AM_CONDITIONAL([WITH_SYSTEMD], [test $USE_SYSTEMD = Yes])
+AC_SUBST([SYSTEMD_SERVICE_TYPE])
+
 dnl ----[Check if have linux/if.h and net/if.h namespace collision]----
 # Including <linux/if.h> and <net/if.h> can cause a namespace collision.
 # Later versions of the headers are OK if linux/if.h is included second
@@ -2019,14 +2116,23 @@ if test "$enable_vrrp" != no; then
   dnl -- Check for process events connector - Linux v2.6.15
   AS_IF([test .$enable_track_process != .no],
     [
-      add_system_opt([CN_PROC])
-      HAVE_CN_PROC=Yes
-      AC_DEFINE([_WITH_CN_PROC_], [ 1 ], [Define to 1 if have linux/cn_proc.h and track-process not disabled])
-      dnl -- PROC_EVENT_SID since Linux v2.6.32
-      dnl -- PROC_EVENT_PTRACE since Linux v3.1
-      dnl -- PROC_EVENT_COMM since Linux v3.2
-      dnl -- PROC_EVENT_COREDUMP since Linux v3.10
-      AC_CHECK_DECLS([PROC_EVENT_SID, PROC_EVENT_PTRACE, PROC_EVENT_COMM, PROC_EVENT_COREDUMP], [], [], [[#include <linux/cn_proc.h>]])
+      AC_CHECK_HEADERS([linux/cn_proc.h],
+	[
+	  add_system_opt([CN_PROC])
+	  HAVE_CN_PROC=Yes
+	  AC_DEFINE([_WITH_CN_PROC_], [ 1 ], [Define to 1 if have linux/cn_proc.h and track-process not disabled])
+	  dnl -- PROC_EVENT_SID since Linux v2.6.32
+	  dnl -- PROC_EVENT_PTRACE since Linux v3.1
+	  dnl -- PROC_EVENT_COMM since Linux v3.2
+	  dnl -- PROC_EVENT_COREDUMP since Linux v3.10
+	  AC_CHECK_DECLS([PROC_EVENT_SID, PROC_EVENT_PTRACE, PROC_EVENT_COMM, PROC_EVENT_COREDUMP], [], [], [[#include <linux/cn_proc.h>]])
+	],
+	[
+	  AS_IF([test .$enable_track_process = .yes],
+	    [
+	      AC_MSG_ERROR([--enable-track-process specified but process events connector not supported])
+	    ])
+	])
     ],
     [add_config_opt([DISABLE_TRACK_PROCESS])])
 fi
@@ -2070,6 +2176,9 @@ CPPFLAGS="$SAV_CPPFLAGS"
 
 dnl ----[ Check for GLOB_BRACE support ]----
 AC_CHECK_DECLS([GLOB_BRACE], [add_system_opt([GLOB_BRACE])], [], [[#include <glob.h>]])
+
+dnl ----[ Check for GLOB_ALTDIRFUNC support ]----
+AC_CHECK_DECLS([GLOB_ALTDIRFUNC], [add_system_opt([GLOB_ALTDIRFUNC])], [], [[#include <glob.h>]])
 
 dnl ----[ Check for timegm() support ]----
 AC_MSG_CHECKING([for timegm()])
@@ -2432,21 +2541,28 @@ if test "${enable_fwmark}" != no; then
 fi
 
 dnl ---[ check for setns() ]----
-dnl -- CLONE_NEWNET defined from Linux 3.0
 SAV_CFLAGS="$CFLAGS"
-AC_CHECK_DECLS([CLONE_NEWNET], [], [], [[#include <sched.h>]])
-dnl -- From glibc 2.14. Otherwise use setns syscall, since Linux 2.4.x
-AC_CHECK_FUNCS([setns])
-dnl -- When building a RedHat RPM with hardening enabled, -pie is specified,
-dnl -- and for setns this requires -fPIC
-AS_IF([test $ac_cv_func_setns = no],
+AC_CHECK_DECLS([__NR_setns],
+  [
+    dnl -- CLONE_NEWNET defined from Linux 3.0
+    AC_CHECK_DECLS([CLONE_NEWNET], [], [], [[#include <sched.h>]])
+    dnl -- From glibc 2.14. Otherwise use setns syscall, since Linux 2.4.x
+    AC_CHECK_FUNCS([setns])
+    dnl -- When building a RedHat RPM with hardening enabled, -pie is specified,
+    dnl -- and for setns this requires -fPIC
+    AS_IF([test $ac_cv_func_setns = no],
       [
 	AS_UNSET([ac_cv_func_setns])
 	CFLAGS="$CFLAGS -fPIC"
 	AC_CHECK_FUNCS([setns])
       ])
+  ],
+  [
+    AC_DEFINE([HAVE_DECL_CLONE_NEWNET], [ 0 ], [__NR_setns is not defined so cannot use CLONE_NEWNET])
+  ],
+  [[#include <linux/unistd.h>]])
 CFLAGS="$SAV_CFLAGS"
-AM_CONDITIONAL([WITH_NAMESPACES], [test $ac_cv_have_decl_CLONE_NEWNET = yes])
+AM_CONDITIONAL([WITH_NAMESPACES], [test .$ac_cv_have_decl_CLONE_NEWNET = .yes])
 
 dnl -- RLIMIT_RTTIME since Linux 2.6.25 - not supported with musl libc
 AC_CHECK_DECLS([RLIMIT_RTTIME], [], [], [[#include <sys/resource.h>]])
@@ -2463,14 +2579,28 @@ if test "${enable_gnu_std_paths}" = "yes"; then
   AC_DEFINE([GNU_STD_PATHS], [ 1 ], [set to enforce GNU standard paths, for .pid files etc])
   RUN_DIR=$localstatedir
 elif test $RUN_DIR_SPECIFIED = Y -a .${with_run_dir} != .no; then
-  RUN_DIR=`echo ${with_run_dir} | sed -e "s:/run/*$::"`	# Remove a trailing /run - somewill will include it sometime
+  AS_IF([test `expr substr ${with_run_dir} 1 1` != /], [AC_MSG_ERROR([run-dir must be absolute path])])
+  # Remove any trailing /run and / - someone will include then sometime
+  RUN_DIR=`echo ${with_run_dir} | sed -e "s:/run/*$::" -e "s:/*$::"`
 elif test -d /run; then
   RUN_DIR=
 else
   RUN_DIR=/var
 fi
 AC_DEFINE_UNQUOTED([RUN_DIR_ROOT], [ "${RUN_DIR}" ], [Parent directory of /run])
-AC_SUBST([RUN_DIR])
+AC_SUBST([RUN_DIR_ROOT], [${RUN_DIR}])
+
+if test $TMP_DIR_SPECIFIED = Y; then
+  AS_IF([test `expr substr ${with_tmp_dir} 1 1` != /], [AC_MSG_ERROR([tmp-dir must be absolute path])])
+  # Remove any trailing / - someone will include it sometime
+  KA_TMP_DIR=`echo ${with_tmp_dir} | sed -e "s:/*$::"`
+else
+  KA_TMP_DIR=/tmp
+fi
+KA_TMP_DIR_LEN=`expr length $KA_TMP_DIR`
+AC_DEFINE_UNQUOTED([KA_TMP_DIR], [ "${KA_TMP_DIR}" ], [Location for temporary files])
+AC_DEFINE_UNQUOTED([KA_TMP_DIR_LEN], [ ${KA_TMP_DIR_LEN} ], [Length of KA_TMP_DIR])
+AC_SUBST([KA_TMP_DIR], [${KA_TMP_DIR}])
 
 dnl - Check type of rlim_t for printf() - this check needs to be late on
 dnl - since _FILE_OFFSET_BITS (set when using netsnmp) alters sizeof(rlim_t)
@@ -2674,6 +2804,15 @@ if test "${ENABLE_LOG_FILE_APPEND}" = Yes; then
   add_config_opt([LOG_FILE_APPEND])
 fi
 
+dnl ----[ Do we want RECVMSG debugging code]----
+ENABLE_RECVMSG_DEBUG=No
+AS_IF([test .$enable_recvmsg_debug = .yes],
+  [
+    AC_DEFINE([_RECVMSG_DEBUG_], [ 1 ], [Define to add VRRP recvmsg() debugging code])
+    add_config_opt([RECVMSG_DEBUG])
+    ENABLE_RECVMSG_DEBUG=Yes
+  ])
+
 dnl ----[ Do we need to check for EINTR, or enable EINTR debugging code]----
 ENABLE_EINTR_DEBUG=No
 AS_IF([test .$enable_eintr_debug = .yes],
@@ -2702,11 +2841,14 @@ AS_IF([test .$enable_script_debug = .yes],
 
 dnl ----[ Do we want to enable track process debugging code]----
 ENABLE_TRACK_PROCESS_DEBUG=No
-AS_IF([test .$enable_track_process_debug = .yes],
+AS_IF([test $HAVE_CN_PROC = Yes],
   [
-    AC_DEFINE([_TRACK_PROCESS_DEBUG_], [ 1 ], [Define to enable logging all process connector events])
-    add_config_opt([TRACK_PROCESS_DEBUG])
-    ENABLE_TRACK_PROCESS_DEBUG=Yes
+    AS_IF([test .$enable_track_process_debug = .yes],
+      [
+	AC_DEFINE([_TRACK_PROCESS_DEBUG_], [ 1 ], [Define to enable logging all process connector events])
+	add_config_opt([TRACK_PROCESS_DEBUG])
+	ENABLE_TRACK_PROCESS_DEBUG=Yes
+      ])
   ])
 
 dnl ----[ Do we want to enable parser debugging code]----
@@ -2835,9 +2977,18 @@ AS_IF([test $default_config_file],
     CONFIG_FILE=$default_config_file
     add_config_opt([DEFAULT_CONFIG_FILE=${default_config_file}])
   ],
-  [default_config_file="/etc/$PACKAGE/$PACKAGE.conf"])
-AC_DEFINE_UNQUOTED([DEFAULT_CONFIG_FILE], ["$default_config_file"], [The default configuration file])
+  [default_config_file="\$(sysconfdir)/$PACKAGE/$PACKAGE.conf"])
+dir=`echo $default_config_file | $SED -e "s|/[[^/]]*$||"`
+name=`echo $default_config_file | $SED -e "s|.*/||"`
 AC_SUBST([DEFAULT_CONFIG_FILE], [$default_config_file])
+AC_SUBST([DEFAULT_CONFIG_DIR], [${dir}])
+AC_SUBST([DEFAULT_CONFIG_FILENAME], [${name}])
+# Change any make $(...) variable to the matching shell variable and substitute
+default_config_file=`echo $default_config_file | $SED -e "s|\\\$(\(.*\))|\\\${\1}|"`
+eval dcf=`echo $default_config_file`
+# Remove a leading ${prefix} since that is not part of the real file name
+dcf=`echo $dcf | $SED -e "s|^\\\${prefix}||"`
+AC_DEFINE_UNQUOTED([DEFAULT_CONFIG_FILE], ["$dcf"], [The default configuration file])
 
 if test -z "$INIT_TYPE"; then
   INIT_TYPE=undetected
@@ -2884,7 +3035,7 @@ cat <<EOF;
 Keepalived configuration
 ------------------------
 Keepalived version       : ${VERSION}
-Compiler                 : ${CC}
+Compiler                 : ${CC} `${CC} --version | head -1`
 Preprocessor flags       : ${KA_CPPFLAGS}
 Compiler flags           : ${KA_CFLAGS}
 EOF
@@ -2932,6 +3083,7 @@ if test .$USE_IPTABLES = .Yes; then
   echo "Use libipset             : ${USE_LIBIPSET}"
 fi
 echo "Use nftables             : ${USE_NFTABLES}"
+echo "systemd integration      : ${USE_SYSTEMD}"
 echo "init type                : ${INIT_TYPE}"
 echo "Strict config checks     : ${STRICT_CONFIG}"
 echo "Build genhash            : ${BUILD_GENHASH}"
@@ -2981,6 +3133,9 @@ if test ${ENABLE_NETLINK_TIMERS} = Yes; then
 fi
 if test ${ENABLE_SMTP_ALERT_DEBUG} = Yes; then
   echo "smtp-alert debugging     : Yes"
+fi
+if test ${ENABLE_RECVMSG_DEBUG} = Yes; then
+  echo "RECVMSG debugging        : Yes"
 fi
 if test ${ENABLE_EINTR_DEBUG} = Yes; then
   echo "EINTR debugging          : Yes"

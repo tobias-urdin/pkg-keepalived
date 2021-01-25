@@ -5,6 +5,12 @@
 #define _CONFIG_H
   
 
+/* Define to 1 to cast via void * */
+#undef CAST_VIA_VOID
+
+/* Define to 1 to do runtime cast alignment checks */
+#undef CHECK_CAST_ALIGN
+
 /* Define if need to check for EINTR errno */
 #undef CHECK_EINTR
 
@@ -38,8 +44,7 @@
 /* Define to 1 if you have the <asm/types.h> header file. */
 #undef HAVE_ASM_TYPES_H
 
-/* Define to 1 if you have the declaration of `CLONE_NEWNET', and to 0 if you
-   don't. */
+/* __NR_setns is not defined so cannot use CLONE_NEWNET */
 #undef HAVE_DECL_CLONE_NEWNET
 
 /* Define to 1 if you have the declaration of `ETHERTYPE_IPV6', and to 0 if
@@ -85,6 +90,10 @@
 /* Define to 1 if you have the declaration of `FRA_UID_RANGE', and to 0 if you
    don't. */
 #undef HAVE_DECL_FRA_UID_RANGE
+
+/* Define to 1 if you have the declaration of `GLOB_ALTDIRFUNC', and to 0 if
+   you don't. */
+#undef HAVE_DECL_GLOB_ALTDIRFUNC
 
 /* Define to 1 if you have the declaration of `GLOB_BRACE', and to 0 if you
    don't. */
@@ -218,6 +227,10 @@
    */
 #undef HAVE_DECL_O_PATH
 
+/* Define to 1 if you have the declaration of `O_TMPFILE', and to 0 if you
+   don't. */
+#undef HAVE_DECL_O_TMPFILE
+
 /* Define to 1 if you have the declaration of `PROC_EVENT_COMM', and to 0 if
    you don't. */
 #undef HAVE_DECL_PROC_EVENT_COMM
@@ -294,8 +307,19 @@
    don't. */
 #undef HAVE_DECL_SO_MARK
 
+/* Define to 1 if you have the declaration of `__NR_memfd_create', and to 0 if
+   you don't. */
+#undef HAVE_DECL___NR_MEMFD_CREATE
+
+/* Define to 1 if you have the declaration of `__NR_setns', and to 0 if you
+   don't. */
+#undef HAVE_DECL___NR_SETNS
+
 /* Define to 1 if you have the `dup2' function. */
 #undef HAVE_DUP2
+
+/* Define to 1 if you have the `dup3' function. */
+#undef HAVE_DUP3
 
 /* Define to 1 if you have the `epoll_create1' function. */
 #undef HAVE_EPOLL_CREATE1
@@ -354,6 +378,9 @@
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
 
+/* Define to 1 if you have the <linux/cn_proc.h> header file. */
+#undef HAVE_LINUX_CN_PROC_H
+
 /* Define to 1 if you have the <linux/ethtool.h> header file. */
 #undef HAVE_LINUX_ETHTOOL_H
 
@@ -401,6 +428,9 @@
 
 /* Define to 1 if you have the `malloc' function. */
 #undef HAVE_MALLOC
+
+/* Define to 1 if you have the `memfd_create' function. */
+#undef HAVE_MEMFD_CREATE
 
 /* Define to 1 if you have the `memmove' function. */
 #undef HAVE_MEMMOVE
@@ -604,6 +634,12 @@
 /* Defined to value in <linux/in.h> if not in <netinet/in.h> */
 #undef IP_MULTICAST_ALL
 
+/* Location for temporary files */
+#undef KA_TMP_DIR
+
+/* Length of KA_TMP_DIR */
+#undef KA_TMP_DIR_LEN
+
 /* configure options specified */
 #undef KEEPALIVED_CONFIGURE_OPTIONS
 
@@ -686,6 +722,9 @@
 /* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
    */
 #undef USE_LIBIPSET_LINUX_IP_SET_H
+
+/* Use syscall for memfd_create */
+#undef USE_MEMFD_CREATE_SYSCALL
 
 /* Version number of package */
 #undef VERSION
@@ -824,6 +863,9 @@
 /* Define to enable parser debugging */
 #undef _PARSER_DEBUG_
 
+/* Define to add VRRP recvmsg() debugging code */
+#undef _RECVMSG_DEBUG_
+
 /* Define to 1 to build with regex debugging support */
 #undef _REGEX_DEBUG_
 
@@ -866,6 +908,9 @@
    <pthread.h>, or <semaphore.h> is not used. If the typedef were allowed, the
    #define below would cause a syntax error. */
 #undef _UINT8_T
+
+/* Define to 1 if want systemd support */
+#undef _USE_SYSTEMD_
 
 /* Define to 1 to build with vrrp fd debugging support */
 #undef _VRRP_FD_DEBUG_

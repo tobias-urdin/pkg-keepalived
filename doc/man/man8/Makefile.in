@@ -171,7 +171,9 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
+DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -193,6 +195,7 @@ KA_CFLAGS = @KA_CFLAGS@
 KA_CPPFLAGS = @KA_CPPFLAGS@
 KA_LDFLAGS = @KA_LDFLAGS@
 KA_LIBS = @KA_LIBS@
+KA_TMP_DIR = @KA_TMP_DIR@
 LDD = @LDD@
 LDFLAGS = @LDFLAGS@
 LIBOBJS = @LIBOBJS@
@@ -216,13 +219,14 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR = @RUN_DIR@
+RUN_DIR_ROOT = @RUN_DIR_ROOT@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SNMP_SERVICE = @SNMP_SERVICE@
 SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
+SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -269,9 +273,13 @@ target_alias = @target_alias@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
+DATE = `date --date=\"\`git log -n 1 -- $@.in | grep Date: | sed -e \"s/  */ /g\" | cut -d' ' -f 4,3,6\`\" +\"%Y-%m-%d\"`
 edit = echo "  EDIT     $@"; \
 	sed \
-	 -e 's|@DEFAULT_CONFIG_FILE[@]|$(DEFAULT_CONFIG_FILE)|g'
+	 -e 's|@DEFAULT_CONFIG_FILE[@]|$(DEFAULT_CONFIG_FILE)|g' \
+	 -e "s|@DATE[@]|$(DATE)|g" \
+	 -e 's|@RUN_DIR_ROOT[@]|$(RUN_DIR_ROOT)|g' \
+	 -e 's|@KA_TMP_DIR[@]|$(KA_TMP_DIR)|g'
 
 dist_man8_MANS = keepalived.8
 EXTRA_DIST = keepalived.8.in

@@ -1,4 +1,4 @@
-.TH KEEPALIVED "8" "July 2018"
+.TH KEEPALIVED "8" "2020-12-18"
 
 .na
 .nh
@@ -31,6 +31,7 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-a\fP|\fB\-\-address-monitoring\fP]
 [\fB\-b\fP|\fB\-\-bfd_pid\fP=FILE]
 [\fB\-s\fP|\fB\-\-namespace\fP=NAME]
+[\fB\-e\fP|\fB\-\-all-config\fP]
 [\fB\-i\fP|\fB\-\-config-id\fP id]
 [\fB\-x\fP|\fB\-\-snmp\fP]
 [\fB\-A\fP|\fB\-\-snmp-agent-socket\fP=FILE]
@@ -41,6 +42,7 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-t\fP|\fB\-\-config\-test\fP[=FILE]]
 [\fB\-\-perf\fP[={all|run|end}]]
 [\fB\-\-debug\fP[=debug-options]]
+[\fB\-\-no-mem-check\fP]
 [\fB\-v\fP|\fB\-\-version\fP]
 [\fB\-h\fP|\fB\-\-help\fP]
 
@@ -58,7 +60,7 @@ with director failover.
 .TP
 \fB -f, --use-file\fP=FILE
 Use the specified configuration file. The default configuration file
-is "/etc/keepalived/keepalived.conf".
+is "/usr/local/etc/keepalived/keepalived.conf".
 .TP
 \fB -P, --vrrp\fP
 Only run the VRRP subsystem. This is useful for configurations that do
@@ -149,6 +151,9 @@ Run keepalived in network namespace NAME. See
 .B NAMESPACES
 below for more details.
 .TP
+\fB -e, --all-config
+Don't load if any configuration file is missing or cannot be read.
+.TP
 \fB -i, --config-id ID
 Use configuration id ID, for conditional configuration (defaults to
 hostname without the domain name).
@@ -180,7 +185,7 @@ Provided the parent process doesn't terminate abnormally, it will restore
 \fBNote:\fP This will also affect any other process producing a core dump while keepalived is running.
 .TP
 \fB --signum\fP=PATTERN
-Returns the signal number to use for STOP, RELOAD, DATA, STATS, STATS_CLEAR and JSON.
+Returns the signal number to use for STOP, RELOAD, DATA, STATS, STATS_CLEAR, JSON and TDATA.
 For example, to stop keepalived running, execute:
 .IP
 .nf
@@ -198,6 +203,9 @@ unless file is specified, in which case it will write to the file.
 \fB --perf\fP[={all|run|end}]
 Record perf data for vrrp process. Data will be written to /perf_vrrp.data.
 The data recorded is for use with the perf tool.
+.TP
+\fB --no-mem-check\fP
+Disable malloc() etc mem-checks if they have been compiled into keepalived.
 .TP
 \fB --debug\fP[=debug-options]]
 Enables debug options if they have been compiled into keepalived.
@@ -239,6 +247,17 @@ M@Email alert debug
 T@Timer debug
 S@TSM debug
 R@Regex debug
+B@Smtp connect debug
+U@Checksum diagnostics
+O@Track process debug
+A@Track process debug with extra detail
+C@Parser (config) debug
+H@Checker debug
+Z@Memory alloc/free error debug
+G@VRRP recvmsg() debug
+J@VRRP recvmsg() log rx data
+V@Script debugging
+K@Dump keywords
 .TE
 .PP
 \fBExample:\fP --debug=DvEcvNR
@@ -339,6 +358,11 @@ and clear the statistics counters
 .B SIGFUNC=JSON
 Write configuration data in JSON format to
 .B /tmp/keepalived.json
+.TP
+.B SIGFUNC=TDATA
+This causes
+.B keepalived
+to write the current state of its internal threads to the log
 .LP
 .SH "USING KEEPALIVED WITH FIREWALLD"
 If you are running a firewall (see

@@ -52,7 +52,10 @@ check_data_t *old_check_data = NULL;
 ssl_data_t *
 alloc_ssl(void)
 {
-	return (ssl_data_t *) MALLOC(sizeof(ssl_data_t));
+	ssl_data_t *ssl_data;
+
+	PMALLOC(ssl_data);
+	return ssl_data;
 }
 void
 free_ssl(void)
@@ -110,13 +113,13 @@ dump_vsg_entry(FILE *fp, const virtual_server_group_entry_t *vsg_entry)
 
 	if (vsg_entry->is_fwmark) {
 		conf_write(fp, "   FWMARK = %u%s", vsg_entry->vfwmark, vsg_entry->fwm_family == AF_INET ? " IPv4" : vsg_entry->fwm_family == AF_INET6 ? " IPv6" : "");
-		conf_write(fp, "   Alive: %u IPv4, %u IPv6",
+		conf_write(fp, "     Alive: %u IPv4, %u IPv6",
 				vsg_entry->fwm4_alive, vsg_entry->fwm6_alive);
 	} else {
 		if (vsg_entry->range) {
 			start = vsg_entry->addr.ss_family == AF_INET ?
-				  ntohl(((const struct sockaddr_in*)&vsg_entry->addr)->sin_addr.s_addr) & 0xFF :
-				  ntohs(((const struct sockaddr_in6*)&vsg_entry->addr)->sin6_addr.s6_addr16[7]);
+				  ntohl(PTR_CAST_CONST(struct sockaddr_in, &vsg_entry->addr)->sin_addr.s_addr) & 0xFF :
+				  ntohs(PTR_CAST_CONST(struct sockaddr_in6, &vsg_entry->addr)->sin6_addr.s6_addr16[7]);
 			conf_write(fp,
 				    vsg_entry->addr.ss_family == AF_INET ?
 					"   VIP Range = %s-%u, VPORT = %d" :
@@ -264,9 +267,9 @@ alloc_vsg_entry(const vector_t *strvec)
 			new->range = 0;
 		else {
 			if (new->addr.ss_family == AF_INET)
-				start = ntohl(((struct sockaddr_in *)&new->addr)->sin_addr.s_addr) & 0xFF;
+				start = ntohl(PTR_CAST(struct sockaddr_in, &new->addr)->sin_addr.s_addr) & 0xFF;
 			else
-				start = ntohs(((struct sockaddr_in6 *)&new->addr)->sin6_addr.s6_addr16[7]);
+				start = ntohs(PTR_CAST(struct sockaddr_in6, &new->addr)->sin6_addr.s6_addr16[7]);
 
 			if (start >= new->range) {
 				report_config_error(CONFIG_GENERAL_ERROR, "Address range end is not greater than address range start - %s - skipping", strvec_slot(strvec, 0));
@@ -359,7 +362,7 @@ free_rs_list(list_head_t *l)
 void
 dump_tracking_rs(FILE *fp, const void *data)
 {
-	const tracking_obj_t *top = (const tracking_obj_t *)data;
+	const tracking_obj_t *top = PTR_CAST_CONST(tracking_obj_t, data);
 	const checker_t *checker = top->obj.checker;
 
 	conf_write(fp, "     %s -> %s, weight %d%s", FMT_VS(checker->vs), FMT_RS(checker->rs, checker->vs), top->weight, top->weight_multiplier == -1 ? " reverse" : "");
@@ -373,10 +376,10 @@ dump_rs(FILE *fp, const real_server_t *rs)
 #endif
 
 	conf_write(fp, "   ------< Real server >------");
-	conf_write(fp, "   RIP = %s, RPORT = %d, WEIGHT = %d EFF WEIGHT = %d"
+	conf_write(fp, "   RIP = %s, RPORT = %d, WEIGHT = %d EFF WEIGHT = %" PRIi64
 			    , inet_sockaddrtos(&rs->addr)
 			    , ntohs(inet_sockaddrport(&rs->addr))
-			    , rs->weight, rs->effective_weight);
+			    , real_weight(rs->effective_weight), rs->effective_weight);
 	dump_forwarding_method(fp, "", rs);
 
 	conf_write(fp, "   Alpha is %s", rs->alpha ? "ON" : "OFF");
@@ -402,7 +405,8 @@ dump_rs(FILE *fp, const real_server_t *rs)
 	conf_write(fp, "   Using smtp notification = %s", rs->smtp_alert ? "yes" : "no");
 
 	conf_write(fp, "   initial weight = %d", rs->iweight);
-	conf_write(fp, "   previous weight = %d", rs->pweight);
+	conf_write(fp, "   effective weight = %" PRIi64, rs->effective_weight);
+	conf_write(fp, "   previous effective_weight = %" PRIi64, rs->peffective_weight);
 	conf_write(fp, "   alive = %d", rs->alive);
 	conf_write(fp, "   num failed checkers = %u", rs->num_failed_checkers);
 	conf_write(fp, "   RS set = %d", rs->set);
@@ -471,7 +475,7 @@ alloc_rs(const char *ip, const char *port)
 #endif
 #endif
 
-	new->weight = INT_MAX;
+	new->effective_weight = INT64_MAX;
 	new->forwarding_method = vs->forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
 	new->tun_type = vs->tun_type;
@@ -492,8 +496,6 @@ alloc_rs(const char *ip, const char *port)
 
 	list_add_tail(&new->e_list, &vs->rs);
 	vs->rs_cnt++;
-
-	clear_dynamic_misc_check_flag();
 }
 
 /*
@@ -722,7 +724,7 @@ alloc_ssvr(const char *ip, const char *port)
 	port_str = (port && port[strspn(port, "0")]) ? port : NULL;
 
 	PMALLOC(new);
-	new->weight = 1;
+	new->effective_weight = 1;
 	new->iweight = 1;
 	new->forwarding_method = vs->forwarding_method;
 #ifdef _HAVE_IPVS_TUN_TYPE_
@@ -878,8 +880,8 @@ format_vsge(const virtual_server_group_entry_t *vsge)
 		snprintf(ret, sizeof(ret), "FWM %u", vsge->vfwmark);
 	else if (vsge->range) {
 		start = vsge->addr.ss_family == AF_INET ?
-			  ntohl(((const struct sockaddr_in*)&vsge->addr)->sin_addr.s_addr) & 0xFF :
-			  ntohs(((const struct sockaddr_in6*)&vsge->addr)->sin6_addr.s6_addr16[7]);
+			  ntohl(PTR_CAST_CONST(struct sockaddr_in, &vsge->addr)->sin_addr.s_addr) & 0xFF :
+			  ntohs(PTR_CAST_CONST(struct sockaddr_in6, &vsge->addr)->sin6_addr.s6_addr16[7]);
 		snprintf(ret, sizeof(ret),
 			    vsge->addr.ss_family == AF_INET ?  "%s-%u,%d" : "%s-%x,%d",
 			    inet_sockaddrtos(&vsge->addr),
@@ -1083,9 +1085,9 @@ validate_check_config(void)
 				rs->warmup = vs->warmup;
 			if (rs->delay_before_retry == ULONG_MAX)
 				rs->delay_before_retry = vs->delay_before_retry;
-			if (rs->weight == INT_MAX) {
-				rs->weight = vs->weight;
-				rs->iweight = rs->weight;
+			if (rs->effective_weight == INT64_MAX) {
+				rs->effective_weight = vs->weight;
+				rs->iweight = rs->effective_weight;
 			}
 
 			if (rs->smtp_alert == -1) {
@@ -1099,7 +1101,7 @@ validate_check_config(void)
 					rs->smtp_alert = true;
 				}
 			}
-			weight_sum += rs->weight;
+			weight_sum += rs->effective_weight;
 
 			/* Check if the real server is the same as the sorry server,
 			 * and if so the inhibit on failure settings must match. */
@@ -1131,6 +1133,7 @@ validate_check_config(void)
 
 		/* Check that the quorum isn't higher than the total weight of
 		 * the real servers, otherwise we will never be able to come up. */
+// TODO - Allow 253 * multiplier per MISC_CHECK if !reverse and ignore this if FILE_CHECK
 		if (vs->quorum > weight_sum) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Warning - quorum %u for %s exceeds total weight of real servers %u, reducing quorum to %u", vs->quorum, FMT_VS(vs), weight_sum, weight_sum);
 			vs->quorum = weight_sum;

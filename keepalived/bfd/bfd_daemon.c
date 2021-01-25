@@ -51,6 +51,10 @@
 #ifdef _WITH_CN_PROC_
 #include "track_process.h"
 #endif
+#ifdef _USE_SYSTEMD_
+#include "systemd.h"
+#endif
+
 
 /* Global variables */
 int bfd_vrrp_event_pipe[2] = { -1, -1};
@@ -151,7 +155,7 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 
 	alloc_bfd_buffer();
 
-	init_data(conf_file, bfd_init_keywords);
+	init_data(conf_file, bfd_init_keywords, false);
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -165,7 +169,14 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* If we are just testing the configuration, then we terminate now */
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
+
 	bfd_complete_init();
+
+	if (global_data->reload_check_config && get_config_status() != CONFIG_OK) {
+		stop_bfd(KEEPALIVED_EXIT_CONFIG);
+		return;
+	}
+
 
 	/* Post initializations */
 #ifdef _MEM_CHECK_
@@ -299,7 +310,8 @@ bfd_respawn_thread(thread_ref_t thread)
 	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
 		thread_add_terminate_event(thread->master);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning", thread->u.c.pid);
+		log_child_died("BFD", thread->u.c.pid);
+
 		restart_delay = calc_restart_delay(&bfd_start_time, &bfd_next_restart_delay, "BFD");
 		if (!restart_delay)
 			start_bfd_child();
@@ -420,6 +432,9 @@ start_bfd_child(void)
 	/* Clear any child finder functions set in parent */
 	set_child_finder_name(NULL);
 
+	/* Create an independant file descriptor for the shared config file */
+	separate_config_file();
+
 	/* Child process part, write pidfile */
 	if (!pidfile_write(bfd_pidfile, getpid())) {
 		/* Fatal error */
@@ -427,6 +442,10 @@ start_bfd_child(void)
 			    "BFD child process: cannot write pidfile");
 		exit(0);
 	}
+
+#ifdef _USE_SYSTEMD_
+	systemd_unset_notify();
+#endif
 
 	/* Create the new master thread */
 	thread_destroy_master(master);
@@ -447,6 +466,9 @@ start_bfd_child(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	bfd_signal_init();
+
+	/* Register emergency shutdown function */
+	register_shutdown_function(stop_bfd);
 #endif
 
 	/* Start BFD daemon */

@@ -123,11 +123,14 @@ typedef struct _data {
 	notify_script_t			*shutdown_script;
 	unsigned			shutdown_script_timeout;
 #ifndef _ONE_PROCESS_DEBUG_
+	const char			*reload_check_config;	/* log file name for validating new configuration before reloading */
 	const char			*reload_time_file;
 	bool				reload_repeat;
 	time_t				reload_time;
 	bool				reload_date_specified;
+	const char			*reload_file;
 #endif
+	const char 			*config_directory;
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
 	bool				allow_if_changes;
@@ -135,6 +138,7 @@ typedef struct _data {
 	int				smtp_alert_vrrp;
 	const char			*default_ifname;	/* Name of default interface */
 	interface_t			*default_ifp;		/* Default interface for static addresses */
+	bool				disable_local_igmp;
 #endif
 #ifdef _WITH_LVS_
 	ipvs_timeout_t			lvs_timeouts;
@@ -142,13 +146,13 @@ typedef struct _data {
 	bool				checker_log_all_failures;
 	struct lvs_syncd_config		lvs_syncd;
 	bool				lvs_flush;		/* flush any residual LVS config at startup */
-	lvs_flush_t			lvs_flush_onstop;	/* flush any LVS config at shutdown */
+	lvs_flush_t			lvs_flush_on_stop;	/* flush any LVS config at shutdown */
 #endif
 	int				max_auto_priority;
 	long				min_auto_priority_delay;
 #ifdef _WITH_VRRP_
-	struct sockaddr_in		vrrp_mcast_group4;
-	struct sockaddr_in6		vrrp_mcast_group6;
+	struct sockaddr_in6		vrrp_mcast_group6 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
+	struct sockaddr_in		vrrp_mcast_group4 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
 	unsigned			vrrp_garp_delay;
 	timeval_t			vrrp_garp_refresh;
 	unsigned			vrrp_garp_rep;
@@ -157,6 +161,10 @@ typedef struct _data {
 	unsigned			vrrp_garp_lower_prio_rep;
 	unsigned			vrrp_garp_interval;
 	unsigned			vrrp_gna_interval;
+#ifdef _HAVE_VRRP_VMAC_
+	unsigned			vrrp_vmac_garp_intvl;
+	bool				vrrp_vmac_garp_all_if;
+#endif
 	bool				vrrp_lower_prio_no_advert;
 	bool				vrrp_higher_prio_send_advert;
 	int				vrrp_version;		/* VRRP version (2 or 3) */
@@ -270,6 +278,10 @@ typedef struct _data {
 	int				vrrp_rx_bufs_multiples;
 	unsigned			vrrp_startup_delay;
 	bool				log_unknown_vrids;
+#ifdef _HAVE_VRRP_VMAC_
+	const char			*vmac_prefix;
+	const char			*vmac_addr_prefix;
+#endif
 #endif
 } data_t;
 

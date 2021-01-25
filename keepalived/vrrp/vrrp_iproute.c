@@ -270,8 +270,8 @@ add_nexthop(nexthop_t *nh, struct rtmsg *rtm, struct rtattr *rta, size_t len, st
 static void
 add_nexthops(ip_route_t *route, struct nlmsghdr *nlh, struct rtmsg *rtm)
 {
-	char buf[ENCAP_RTA_SIZE];
-	struct rtattr *rta = (void *)buf;
+	char buf[ENCAP_RTA_SIZE] __attribute__((aligned(__alignof__(struct rtattr))));
+	struct rtattr *rta = PTR_CAST(struct rtattr, buf);
 	struct rtnexthop *rtnh;
 	nexthop_t *nh;
 
@@ -300,8 +300,8 @@ netlink_route(ip_route_t *iproute, int cmd)
 		struct rtmsg r;
 		char buf[RTM_SIZE];
 	} req;
-	char buf[RTA_SIZE];
-	struct rtattr *rta = (void*)buf;
+	char buf[RTA_SIZE] __attribute__((aligned(__alignof__(struct rtattr))));
+	struct rtattr *rta = PTR_CAST(struct rtattr, buf);
 
 	memset(&req, 0, sizeof (req));
 
@@ -375,8 +375,8 @@ netlink_route(ip_route_t *iproute, int cmd)
 
 #if HAVE_DECL_RTA_ENCAP
 	if (iproute->encap.type != LWTUNNEL_ENCAP_NONE) {
-		char encap_buf[ENCAP_RTA_SIZE];
-		struct rtattr *encap_rta = (void *)encap_buf;
+		char encap_buf[ENCAP_RTA_SIZE] __attribute__((aligned(__alignof__(struct rtattr))));
+		struct rtattr *encap_rta = PTR_CAST(struct rtattr, encap_buf);
 
 		encap_rta->rta_type = RTA_ENCAP;
 		encap_rta->rta_len = RTA_LENGTH(0);
@@ -488,13 +488,13 @@ netlink_route(ip_route_t *iproute, int cmd)
 	log_message(LOG_INFO, "rtmsg buffer used %lu, rtattr buffer used %d", req.n.nlmsg_len - NLMSG_LENGTH(sizeof(struct rtmsg)), rta->rta_len);
 
 	op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), "nlmsghdr %p(%u):", &req.n, req.n.nlmsg_len);
-	for (i = 0, p = (uint8_t*)&req.n; i < sizeof(struct nlmsghdr); i++)
+	for (i = 0, p = PTR_CAST(uint8_t, &req.n); i < sizeof(struct nlmsghdr); i++)
 		op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), " %2.2hhx", *(p++));
 	log_message(LOG_INFO, "%s", lbuf);
 
 	op = lbuf;
 	op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), "rtmsg %p(%lu):", &req.r, req.n.nlmsg_len - sizeof(struct nlmsghdr));
-	for (i = 0, p = (uint8_t*)&req.r; i < + req.n.nlmsg_len - sizeof(struct nlmsghdr); i++)
+	for (i = 0, p = PTR_CAST(uint8_t, &req.r); i < req.n.nlmsg_len - sizeof(struct nlmsghdr); i++)
 		op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), " %2.2hhx", *(p++));
 
 	for (j = 0; lbuf + j < op; j+= MAX_LOG_MSG)
@@ -516,7 +516,7 @@ netlink_route(ip_route_t *iproute, int cmd)
 
 /* Add/Delete a list of IP routes */
 bool
-netlink_rtlist(list_head_t *rt_list, int cmd)
+netlink_rtlist(list_head_t *rt_list, int cmd, bool force)
 {
 	ip_route_t *ip_route;
 
@@ -525,10 +525,10 @@ netlink_rtlist(list_head_t *rt_list, int cmd)
 		return false;
 
 	list_for_each_entry(ip_route, rt_list, e_list) {
-		if ((cmd == IPROUTE_DEL) == ip_route->set) {
+		if ((cmd == IPROUTE_DEL) == ip_route->set || force) {
 			if (!netlink_route(ip_route, cmd))
 				ip_route->set = (cmd == IPROUTE_ADD);
-			else
+			else if (cmd != IPROUTE_ADD)
 				ip_route->set = false;
 		}
 	}
@@ -1290,7 +1290,7 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 	uint8_t family;
 	const char *dest = NULL;
 
-	new = (ip_route_t *) MALLOC(sizeof(ip_route_t));
+	PMALLOC(new);
 	if (!new) {
 		log_message(LOG_INFO, "Unable to allocate new ip_route");
 		return;
@@ -1844,7 +1844,7 @@ clear_diff_routes(list_head_t *l, list_head_t *n)
 	/* All routes removed */
 	if (list_empty(n)) {
 		log_message(LOG_INFO, "Removing a VirtualRoute block");
-		netlink_rtlist(l, IPROUTE_DEL);
+		netlink_rtlist(l, IPROUTE_DEL, false);
 		return;
 	}
 

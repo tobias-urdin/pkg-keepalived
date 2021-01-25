@@ -100,6 +100,34 @@ if_get_by_ifindex(ifindex_t ifindex)
 	return NULL;
 }
 
+#ifdef _HAVE_VRRP_VMAC_
+interface_t * __attribute__ ((pure))
+if_get_by_vmac(uint8_t vrid, int family, const interface_t *base_ifp)
+{
+	interface_t *ifp;
+
+	list_for_each_entry(ifp, &if_queue, e_list) {
+		if (ifp->if_type != IF_TYPE_MACVLAN || ifp->vmac_type !=  MACVLAN_MODE_PRIVATE)
+			continue;
+		if (ifp->base_ifp != base_ifp)
+			continue;
+		if (ifp->hw_addr[0] || ifp->hw_addr[1] || ifp->hw_addr[2] != 0x5e || ifp->hw_addr[3])
+			continue;
+		if ((family == AF_INET && ifp->hw_addr[4] != 0x01) ||
+		    (family == AF_INET6 && ifp->hw_addr[4] != 0x02))
+			continue;
+		if (ifp->hw_addr[5] != vrid)
+			continue;
+
+		ifp->is_ours = true;
+
+		return ifp;
+	}
+
+	return NULL;
+}
+#endif
+
 interface_t *
 get_default_if(void)
 {
@@ -120,13 +148,13 @@ if_extra_ipaddress_alloc(interface_t *ifp, void *addr, unsigned char family)
 	INIT_LIST_HEAD(&saddr->e_list);
 
 	if (family == AF_INET) {
-		saddr->u.sin_addr = *(struct in_addr *) addr;
+		saddr->u.sin_addr = *PTR_CAST(struct in_addr, addr);
 		list_add_tail(&saddr->e_list, &ifp->sin_addr_l);
 		return saddr;
 	}
 
 	if (family == AF_INET6) {
-		saddr->u.sin6_addr = *(struct in6_addr *) addr;
+		saddr->u.sin6_addr = *PTR_CAST(struct in6_addr, addr);
 		list_add_tail(&saddr->e_list, &ifp->sin6_addr_l);
 		return saddr;
 	}
@@ -167,7 +195,7 @@ if_get_by_ifname(const char *ifname, if_lookup_t create)
 
 	list_for_each_entry(ifp, &if_queue, e_list) {
 		if (!strcmp(ifp->ifname, ifname))
-			return ifp;
+			return create == IF_CREATE_NOT_EXIST ? NULL : ifp;
 	}
 
 	if (create == IF_NO_CREATE ||
@@ -243,7 +271,7 @@ set_base_ifp(void)
 static uint16_t
 if_mii_read(int fd, uint16_t phy_id, uint16_t reg_num)
 {
-	struct mii_ioctl_data *data = (struct mii_ioctl_data *)&ifr.ifr_data;
+	struct mii_ioctl_data *data = PTR_CAST(struct mii_ioctl_data, &ifr.ifr_data);
 
 	data->phy_id = phy_id;
 	data->reg_num = reg_num;
@@ -270,7 +298,7 @@ static void if_mii_dump(const uint16_t *mii_regs, size_t num_regs, unsigned phy_
 static int
 if_mii_status(const int fd)
 {
-	struct mii_ioctl_data *data = (struct mii_ioctl_data *)&ifr.ifr_data;
+	struct mii_ioctl_data *data = PTR_CAST(struct mii_ioctl_data, &ifr.ifr_data);
 	uint16_t phy_id = data->phy_id;
 	uint16_t bmsr, new_bmsr;
 
@@ -301,7 +329,7 @@ if_mii_status(const int fd)
 static int
 if_mii_probe(const int fd, const char *ifname)
 {
-	struct mii_ioctl_data *data = (struct mii_ioctl_data *)&ifr.ifr_data;
+	struct mii_ioctl_data *data = PTR_CAST(struct mii_ioctl_data, &ifr.ifr_data);
 	uint16_t phy_id;
 
 	memset(&ifr, 0, sizeof (struct ifreq));
@@ -428,13 +456,25 @@ alloc_garp_delay(void)
 	return gd;
 }
 
+static void
+set_garp_delay(interface_t *ifp, const garp_delay_t *delay)
+{
+	ifp->garp_delay = alloc_garp_delay();
+
+	ifp->garp_delay->garp_interval = delay->garp_interval;
+	ifp->garp_delay->have_garp_interval = delay->have_garp_interval;
+	ifp->garp_delay->gna_interval = delay->gna_interval;
+	ifp->garp_delay->have_gna_interval = delay->have_gna_interval;
+}
+
 void
 set_default_garp_delay(void)
 {
 	garp_delay_t default_delay = {};
 	interface_t *ifp;
-	garp_delay_t *delay;
 	vrrp_t *vrrp;
+	list_head_t *vip_list;
+	ip_address_t *vip;
 
 	if (global_data->vrrp_garp_interval) {
 		default_delay.garp_interval.tv_sec = global_data->vrrp_garp_interval / 1000000;
@@ -453,14 +493,16 @@ set_default_garp_delay(void)
 		if (!vrrp->ifp)
 			continue;
 		ifp = IF_BASE_IFP(vrrp->ifp);
-		if (!ifp->garp_delay) {
-			delay = alloc_garp_delay();
-			delay->garp_interval = default_delay.garp_interval;
-			delay->have_garp_interval = default_delay.have_garp_interval;
-			delay->gna_interval = default_delay.gna_interval;
-			delay->have_gna_interval = default_delay.have_gna_interval;
+		if (!ifp->garp_delay)
+			set_garp_delay(ifp, &default_delay);
 
-			ifp->garp_delay = delay;
+		/* We also need delays for any i/fs used by VIPs/eVIPs */
+		for (vip_list = &vrrp->vip; vip_list; vip_list = vip_list == &vrrp->vip ? &vrrp->evip : NULL) {
+			list_for_each_entry(vip, vip_list, e_list) {
+				ifp = IF_BASE_IFP(vip->ifp);
+				if (!ifp->garp_delay)
+					set_garp_delay(ifp, &default_delay);
+			}
 		}
 	}
 }
@@ -491,7 +533,7 @@ dump_if(FILE *fp, const interface_t *ifp)
 		list_for_each_entry(saddr, &ifp->sin_addr_l, e_list)
 			conf_write(fp, "     %s", inet_ntop2(saddr->u.sin_addr.s_addr));
 	}
-	if (ifp->sin6_addr.s6_addr32[0]) {
+	if (!IN6_IS_ADDR_UNSPECIFIED(&ifp->sin6_addr)) {
 		inet_ntop(AF_INET6, &ifp->sin6_addr, addr_str, sizeof(addr_str));
 		conf_write(fp, "   IPv6 address = %s", addr_str);
 	} else
@@ -558,7 +600,7 @@ dump_if(FILE *fp, const interface_t *ifp)
 #ifdef HAVE_IFLA_LINK_NETNSID
 			conf_write(fp, "   %s type %s, underlying ifindex = %u, netns id = %d", if_type, vlan_type, ifp->base_ifindex, ifp->base_netns_id);
 #else
-			conf_write(fp, "   %s type %s, underlying ifindex = %d", if_type, vlan_type, ifp->base_ifindex);
+			conf_write(fp, "   %s type %s, underlying ifindex = %u", if_type, vlan_type, ifp->base_ifindex);
 #endif
 		}
 		else
@@ -608,13 +650,13 @@ dump_if(FILE *fp, const interface_t *ifp)
 	if (ifp->garp_delay) {
 		if (ifp->garp_delay->have_garp_interval)
 			conf_write(fp, "   Gratuitous ARP interval %ldms",
-				    ifp->garp_delay->garp_interval.tv_sec * 100 +
-				     ifp->garp_delay->garp_interval.tv_usec / (TIMER_HZ / 100));
+				    ifp->garp_delay->garp_interval.tv_sec * 1000 +
+				     ifp->garp_delay->garp_interval.tv_usec / (TIMER_HZ / 1000));
 
 		if (ifp->garp_delay->have_gna_interval)
 			conf_write(fp, "   Gratuitous NA interval %ldms",
-				    ifp->garp_delay->gna_interval.tv_sec * 100 +
-				     ifp->garp_delay->gna_interval.tv_usec / (TIMER_HZ / 100));
+				    ifp->garp_delay->gna_interval.tv_sec * 1000 +
+				     ifp->garp_delay->gna_interval.tv_usec / (TIMER_HZ / 1000));
 		if (ifp->garp_delay->aggregation_group)
 			conf_write(fp, "   Gratuitous ARP aggregation group %d", ifp->garp_delay->aggregation_group);
 	}
@@ -930,13 +972,13 @@ if_join_vrrp_group(sa_family_t family, int *sd, const interface_t *ifp)
 		{
 			imr.imr_ifindex = IF_INDEX(IF_BASE_IFP(ifp));
 			if (setsockopt(*sd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-					 (char *) &imr, (socklen_t)sizeof(struct ip_mreqn)) < 0)
+					 PTR_CAST(char, &imr), (socklen_t)sizeof(struct ip_mreqn)) < 0)
 				log_message(LOG_INFO, "Failed to set GARP on base if - errno %d (%m)", errno);
 		}
 #endif
 		imr.imr_ifindex = (int)IF_INDEX(ifp);
 		ret = setsockopt(*sd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-				 (char *) &imr, (socklen_t)sizeof(struct ip_mreqn));
+				 PTR_CAST(char, &imr), (socklen_t)sizeof(struct ip_mreqn));
 	} else {
 		memset(&imr6, 0, sizeof(imr6));
 		imr6.ipv6mr_multiaddr = global_data->vrrp_mcast_group6.sin6_addr;
@@ -944,13 +986,13 @@ if_join_vrrp_group(sa_family_t family, int *sd, const interface_t *ifp)
 		if (send_on_base_if) {
 			imr6.ipv6mr_interface = IF_INDEX(IF_BASE_IFP(ifp));
 			if (setsockopt(*sd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
-					 (char *) &imr6, (socklen_t)sizeof(struct ipv6_mreq)) < 0)
+					 PTR_CAST(char, &imr6), (socklen_t)sizeof(struct ipv6_mreq)) < 0)
 				log_message(LOG_INFO, "Failed to set MLD on base if - errno %d (%m)", errno);
 		}
 #endif
 		imr6.ipv6mr_interface = IF_INDEX(ifp);
 		ret = setsockopt(*sd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
-				 (char *) &imr6, (socklen_t)sizeof(struct ipv6_mreq));
+				 PTR_CAST(char, &imr6), (socklen_t)sizeof(struct ipv6_mreq));
 	}
 
 	if (ret < 0) {
@@ -986,11 +1028,11 @@ if_leave_vrrp_group(sa_family_t family, int sd, const interface_t *ifp)
 		    ifp->is_ours) {
 			imr.imr_ifindex = IF_INDEX(IF_BASE_IFP(ifp));
 			setsockopt(sd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
-					 (char *) &imr, sizeof(imr));
+					 PTR_CAST(char, &imr), sizeof(imr));
 		}
 		imr.imr_ifindex = (int)IF_INDEX(ifp);
 		ret = setsockopt(sd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
-				 (char *) &imr, sizeof(imr));
+				 PTR_CAST(char, &imr), sizeof(imr));
 #endif
 	} else {
 		memset(&imr6, 0, sizeof(imr6));
@@ -1002,12 +1044,12 @@ if_leave_vrrp_group(sa_family_t family, int sd, const interface_t *ifp)
 		    ifp->is_ours) {
 			imr6.ipv6mr_interface = IF_INDEX(IF_BASE_IFP(ifp));
 			setsockopt(sd, IPPROTO_IPV6, IPV6_DROP_MEMBERSHIP,
-					 (char *) &imr6, sizeof(struct ipv6_mreq));
+					 PTR_CAST(char, &imr6), sizeof(struct ipv6_mreq));
 		}
 #endif
 		imr6.ipv6mr_interface = IF_INDEX(ifp);
 		ret = setsockopt(sd, IPPROTO_IPV6, IPV6_DROP_MEMBERSHIP,
-				 (char *) &imr6, sizeof(struct ipv6_mreq));
+				 PTR_CAST(char, &imr6), sizeof(struct ipv6_mreq));
 	}
 
 	if (ret < 0) {
@@ -1339,15 +1381,26 @@ cleanup_lost_interface(interface_t *ifp)
 	list_for_each_entry(top, &ifp->tracking_vrrp, e_list) {
 		vrrp = top->obj.vrrp;
 
-		/* If this is just a tracking interface, we don't need to do anything */
+		/* If this instance does not have an interface, we don't need to do anything,
+		   but I don't this can ever be true */
 		if (!vrrp->ifp)
 			continue;
+
 		if (vrrp->ifp != ifp
 #ifdef _HAVE_VRRP_VMAC_
 		    && IF_BASE_IFP(vrrp->ifp) != ifp && VRRP_CONFIGURED_IFP(vrrp) != ifp
 #endif
-											)
+											) {
+			/* We must be a tracked interface */
+			if (IF_ISUP(ifp)) {
+				if (top->weight) {
+					vrrp->total_priority -= top->weight * top->weight_multiplier;
+					vrrp_set_effective_priority(vrrp);
+				} else
+					down_instance(vrrp);
+			}
 			continue;
+		}
 
 		/* If the vrrp instance's interface doesn't exist, skip it */
 		if (!vrrp->ifp->ifindex)
@@ -1368,6 +1421,7 @@ cleanup_lost_interface(interface_t *ifp)
 			/* This is a changeable interface that the vrrp instance
 			 * was configured on. Delete the macvlan/ipvlan we created */
 			netlink_link_del_vmac(vrrp);
+// HERE
 		}
 
 		if (vrrp->configured_ifp == ifp &&
@@ -1388,14 +1442,16 @@ cleanup_lost_interface(interface_t *ifp)
 #endif
 
 		/* Find the sockpool entry. If none, then we have closed the socket */
-		if (vrrp->sockets->fd_in != -1) {
-			thread_cancel_read(master, vrrp->sockets->fd_in);
-			close(vrrp->sockets->fd_in);
-			vrrp->sockets->fd_in = -1;
-		}
-		if (vrrp->sockets->fd_out != -1) {
-			close(vrrp->sockets->fd_out);
-			vrrp->sockets->fd_out = -1;
+		if (vrrp->sockets) {
+			if (vrrp->sockets->fd_in != -1) {
+				thread_cancel_read(master, vrrp->sockets->fd_in);
+				close(vrrp->sockets->fd_in);
+				vrrp->sockets->fd_in = -1;
+			}
+			if (vrrp->sockets->fd_out != -1) {
+				close(vrrp->sockets->fd_out);
+				vrrp->sockets->fd_out = -1;
+			}
 		}
 
 		if (IF_ISUP(ifp))
