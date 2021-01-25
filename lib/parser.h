@@ -42,6 +42,9 @@
 /* Maximum time read_timer can read - in micro-seconds */
 #define TIMER_MAXIMUM (ULONG_MAX)
 
+/* Special value for parameters when we want to know they haven't been set */
+#define	PARAMETER_UNSET		UINT_MAX
+
 /* Configuration test errors. These should be in decreasing order of severity */
 typedef enum {
 	CONFIG_OK,
@@ -62,6 +65,7 @@ typedef enum {
 	CONFIG_MISSING_PARAMETER,
 	CONFIG_INVALID_NUMBER,
 	CONFIG_GENERAL_ERROR,
+	CONFIG_WARNING,
 
 	/* The following is for script security not enabled when needed */
 	CONFIG_SECURITY_ERROR,
@@ -91,12 +95,12 @@ extern bool do_dump_keywords;
 static inline const char * __attribute__((malloc))
 set_value_r(const vector_t *strvec)
 {
-        return STRDUP(strvec_slot(strvec, 1));
+	return STRDUP(strvec_slot(strvec, 1));
 }
 
 #ifdef _MEM_CHECK_
 #define alloc_strvec(str)	(memcheck_log("alloc_strvec", str, (__FILE__), (__func__), (__LINE__)), \
-                                 alloc_strvec_r(str))
+				 alloc_strvec_r(str))
 
 #define set_value(str)		(memcheck_log("set_value", strvec_slot(str,1), (__FILE__), (__func__), (__LINE__)), \
 				 set_value_r(str))
@@ -108,6 +112,8 @@ set_value_r(const vector_t *strvec)
 /* Prototypes */
 extern void report_config_error(config_err_t, const char *format, ...)
 	__attribute__((format (printf, 2, 3)));
+extern void use_disk_copy_for_config(const char *);
+extern void clear_config_status(void);
 extern config_err_t get_config_status(void) __attribute__ ((pure));
 extern bool read_int(const char *, int *, int, int, bool);
 extern bool read_unsigned(const char *, unsigned *, unsigned, unsigned, bool);
@@ -118,6 +124,8 @@ extern bool read_unsigned_strvec(const vector_t *, size_t, unsigned *, unsigned,
 extern bool read_unsigned64_strvec(const vector_t *, size_t, uint64_t *, uint64_t, uint64_t, bool);
 extern bool read_unsigned_base_strvec(const vector_t *, size_t, int, unsigned *, unsigned, unsigned, bool);
 extern bool read_double_strvec(const vector_t *, size_t, double *, double, double, bool);
+extern bool read_decimal_unsigned_strvec(const vector_t *, size_t, unsigned *, unsigned, unsigned, unsigned, bool);
+extern uint16_t read_hex_str(const char *, uint8_t **, uint8_t **);
 extern void set_random_seed(unsigned int);
 extern void install_keyword_root(const char *, void (*handler) (const vector_t *), bool);
 extern void install_root_end_handler(void (*handler) (void));
@@ -129,10 +137,16 @@ extern const vector_t *alloc_strvec_quoted_escaped(const char *);
 extern vector_t *alloc_strvec_r(const char *);
 extern bool check_conf_file(const char*);
 extern const vector_t *read_value_block(const vector_t *);
-extern void alloc_value_block(void (*alloc_func) (const vector_t *), const char *);
+extern void alloc_value_block(void (*alloc_func) (const vector_t *), const vector_t *);
 extern bool read_timer(const vector_t *, size_t, unsigned long *, unsigned long, unsigned long, bool);
 extern int check_true_false(const char *) __attribute__ ((pure));
 extern void skip_block(bool);
-extern void init_data(const char *, const vector_t * (*init_keywords) (void));
+extern void init_data(const char *, const vector_t * (*init_keywords) (void), bool);
+extern void truncate_config_copy(void);
+extern int get_config_fd(void);
+extern void set_config_fd(int);
+void include_check_set(const vector_t *);
+bool had_config_file_error(void) __attribute__((pure));
+void separate_config_file(void);
 
 #endif

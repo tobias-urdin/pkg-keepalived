@@ -100,7 +100,8 @@ POST_UNINSTALL = :
 @ASSERTS_TRUE@am__append_6 = assert.c old_socket.h
 subdir = lib
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
+	$(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -118,10 +119,9 @@ liblib_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
 	$(am__append_5)
 am_liblib_a_OBJECTS = memory.$(OBJEXT) utils.$(OBJEXT) \
 	notify.$(OBJEXT) timer.$(OBJEXT) scheduler.$(OBJEXT) \
-	vector.$(OBJEXT) list.$(OBJEXT) html.$(OBJEXT) \
-	parser.$(OBJEXT) signals.$(OBJEXT) logger.$(OBJEXT) \
-	list_head.$(OBJEXT) rbtree.$(OBJEXT) process.$(OBJEXT) \
-	json_writer.$(OBJEXT)
+	vector.$(OBJEXT) html.$(OBJEXT) parser.$(OBJEXT) \
+	signals.$(OBJEXT) logger.$(OBJEXT) list_head.$(OBJEXT) \
+	rbtree.$(OBJEXT) process.$(OBJEXT) json_writer.$(OBJEXT)
 am__EXTRA_liblib_a_SOURCES_DIST = rttables.c rttables.h old_socket.c \
 	old_socket.h assert.c
 liblib_a_OBJECTS = $(am_liblib_a_OBJECTS)
@@ -138,7 +138,7 @@ am__v_at_ = $(am__v_at_@AM_DEFAULT_V@)
 am__v_at_0 = @
 am__v_at_1 = 
 DEFAULT_INCLUDES = -I.@am__isrc@
-depcomp = $(SHELL) $(top_srcdir)/depcomp
+depcomp = $(SHELL) $(top_srcdir)/build-aux/depcomp
 am__depfiles_maybe = depfiles
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
@@ -181,7 +181,7 @@ am__define_uniq_tagged_files = \
 ETAGS = etags
 CTAGS = ctags
 am__DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/config.h.in \
-	$(srcdir)/config_warnings.h.in $(top_srcdir)/depcomp
+	$(srcdir)/config_warnings.h.in $(top_srcdir)/build-aux/depcomp
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 ACLOCAL = @ACLOCAL@
 AMTAR = @AMTAR@
@@ -198,7 +198,9 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
+DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
 DEFS = @DEFS@
 DEPDIR = @DEPDIR@
 ECHO_C = @ECHO_C@
@@ -220,6 +222,7 @@ KA_CFLAGS = @KA_CFLAGS@
 KA_CPPFLAGS = @KA_CPPFLAGS@
 KA_LDFLAGS = @KA_LDFLAGS@
 KA_LIBS = @KA_LIBS@
+KA_TMP_DIR = @KA_TMP_DIR@
 LDD = @LDD@
 LDFLAGS = @LDFLAGS@
 LIBOBJS = @LIBOBJS@
@@ -239,17 +242,18 @@ PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_URL = @PACKAGE_URL@
 PACKAGE_VERSION = @PACKAGE_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
-PID_DIR = @PID_DIR@
 PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
+RUN_DIR_ROOT = @RUN_DIR_ROOT@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SNMP_SERVICE = @SNMP_SERVICE@
 SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
+SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -305,13 +309,13 @@ AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 BUILT_SOURCES = $(GIT_COMMIT_FILE)
 noinst_LIBRARIES = liblib.a
 liblib_a_SOURCES = memory.c utils.c notify.c timer.c scheduler.c \
-			  vector.c list.c html.c parser.c signals.c logger.c \
+			  vector.c html.c parser.c signals.c logger.c \
 			  list_head.c rbtree.c process.c json_writer.c \
 			  bitops.h timer.h scheduler.h vector.h parser.h \
-			  signals.h notify.h logger.h list.h memory.h html.h utils.h \
+			  signals.h notify.h logger.h memory.h html.h utils.h \
 			  keepalived_magic.h list_head.h rbtree.h process.h \
 			  rbtree_augmented.h assert_debug.h json_writer.h \
-			  warnings.h container.h
+			  warnings.h container.h align.h
 
 liblib_a_LIBADD = $(am__append_1) $(am__append_3) $(am__append_5)
 EXTRA_liblib_a_SOURCES = $(am__append_2) $(am__append_4) \
@@ -393,7 +397,6 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/assert.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/html.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/json_writer.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/list.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/list_head.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/logger.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/memory.Po@am__quote@
@@ -640,10 +643,16 @@ FORCE:
 # The one file that needs to be ignored is deletion of snap/snapcraft.yaml,
 # since in a snapcraft build that file is deleted
 # (see https://bugs.launchpad.net/snapcraft/+bug/1662388).
+#
+# Note: date -d "1970-01-01 UTC" fails using Busybox date
+#
 $(GIT_COMMIT_FILE): FORCE
-	@if [ ! -f $(srcdir)/$@ -a ! -f $@ ]; then \
-		echo '#define GIT_DATE	"unknown"' >$@; \
-		echo "#define GIT_YEAR	\"`date +%Y`\"" >>$@; \
+	@if [ ! -f $(srcdir)/$@ ]; then \
+		LATEST_FILE=`ls -t \`find $(srcdir)/.. -type f -name Makefile.am -o -name configure.ac -o -name '*.[ch]' | grep -v "lib/config.h" | grep -v "lib/config_warnings.h" | grep -v "lib/git-commit.h" | grep -v "/test/"\` | head -1`; \
+		LATEST_FILE_DATE=`date -u --reference=$${LATEST_FILE} "+%m/%d,%Y"`; \
+		echo "/* Dates are UTC */" >$(abs_builddir)/$@; \
+		echo "#define GIT_DATE	\"$${LATEST_FILE_DATE}\"" >>$(abs_builddir)/$@; \
+		echo "#define GIT_YEAR	\"`echo $${LATEST_FILE_DATE} | sed -e "s/.*,//"`\"" >>$(abs_builddir)/$@; \
 	fi; \
 	if [ -x `type -p git` ]; then \
 		cd $(srcdir); \
@@ -651,9 +660,15 @@ $(GIT_COMMIT_FILE): FORCE
 		if [ $$? -eq 0 ]; then \
 			GIT_REV=`git describe --tags`; \
 			GIT_TIMESTAMP=`git log -1 --format=%ct`; \
-			GIT_DATE=`date -d "1970-01-01 UTC $${GIT_TIMESTAMP} seconds" +"%m/%d,%Y"`; \
+			date -d "1970-01-01 UTC" >/dev/null 2>&1 ; \
+			if test $$? -eq 0; then \
+				SECONDS_STR="UTC $${GIT_TIMESTAMP} seconds"; \
+			else \
+				SECONDS_STR="0:0:$${GIT_TIMESTAMP}"; \
+			fi; \
+			GIT_DATE=`date -u +"%m/%d,%Y" -d "1970-01-01 $${SECONDS_STR}"`; \
 			if test -n "$${GIT_DATE}"; then \
-				GIT_YEAR=`date -d "1970-01-01 UTC $${GIT_TIMESTAMP} seconds" +"%Y"`; \
+				GIT_YEAR=`date -u +"%Y" -d "1970-01-01 $${SECONDS_STR}"`; \
 			else \
 				GIT_DATE=`git log -1 --date=iso | grep Date: | sed -e "s/^[^ ]* *\(....\)-\(..\)-\(..\).*/\2\/\3,\1/"`; \
 				GIT_YEAR=`echo $${GIT_DATE} | sed -e "s/.*,//"`; \
@@ -661,14 +676,17 @@ $(GIT_COMMIT_FILE): FORCE
 			if [ "`git status --porcelain | \
 			       grep -v '^??' | \
 			       grep -v "^ D snap/snapcraft.yaml" | \
+			       grep -v "^ D snap/hooks/install" | \
+			       grep -v "^ D snap/hooks/post-refresh" | \
 			       wc -l`" -ne 0 ]; then \
 				EXTRA="+"; \
 			else \
 				EXTRA=""; \
 			fi; \
+			echo "/* Dates are UTC */" >$(abs_builddir)/$@.new; \
 			echo $${GIT_REV} | grep -qE -- "-[1-9][0-9]*-g[0-9a-f]{7,}$$"; \
 			if [ $$? -eq 0 -o -n "$${EXTRA}" ]; then \
-				echo "#define GIT_COMMIT \"$${GIT_REV}$${EXTRA}\"" >$(abs_builddir)/$@.new; \
+				echo "#define GIT_COMMIT \"$${GIT_REV}$${EXTRA}\"" >>$(abs_builddir)/$@.new; \
 			fi; \
 			echo "#define GIT_DATE \"$${GIT_DATE}\"" >>$(abs_builddir)/$@.new; \
 			echo "#define GIT_YEAR \"$${GIT_YEAR}\"" >>$(abs_builddir)/$@.new; \

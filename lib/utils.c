@@ -34,7 +34,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <sys/prctl.h>
-#if defined _WITH_LVS_ || defined _LIBIPSET_DYNAMIC_
+#if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
 #include <sys/wait.h>
 #endif
 #ifdef _WITH_PERF_
@@ -43,11 +43,6 @@
 #include <sys/stat.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
-#endif
-
-#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
-#include <signal.h>
-#include <sys/wait.h>
 #endif
 
 #ifdef _WITH_STACKTRACE_
@@ -64,13 +59,15 @@
 #include "bitops.h"
 #include "parser.h"
 #include "logger.h"
-#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
 #include "process.h"
-#endif
 
 /* global vars */
 unsigned long debug = 0;
 mode_t umask_val = S_IXUSR | S_IRWXG | S_IRWXO;
+
+#ifdef _EINTR_DEBUG_
+bool do_eintr_debug;
+#endif
 
 /* Display a buffer into a HEXA formated output */
 void
@@ -115,7 +112,7 @@ dump_buffer(const char *buff, size_t count, FILE* fp, int indent)
 	}
 }
 
-#ifdef CHECKSUM_DIAGNOSTICS
+#if defined _CHECKSUM_DEBUG_ || defined _RECVMSG_DEBUG_
 void
 log_buffer(const char *msg, const void *buff, size_t count)
 {
@@ -129,7 +126,7 @@ log_buffer(const char *msg, const void *buff, size_t count)
 
 	while (offs < count) {
 		ptr = op_buf;
-		ptr += snprintf(ptr, op_buf + sizeof(op_buf) - ptr, "%4.4lx ", offs);
+		ptr += snprintf(ptr, op_buf + sizeof(op_buf) - ptr, "%4.4zx ", offs);
 
 		for (i = 0; i < 16 && offs < count; i++) {
 			if (i == 8)
@@ -151,6 +148,7 @@ write_stacktrace(const char *file_name, const char *str)
 	unsigned int nptrs;
 	unsigned int i;
 	char **strs;
+	char cmd[40];
 
 	nptrs = backtrace(buffer, 100);
 	if (file_name) {
@@ -175,8 +173,12 @@ write_stacktrace(const char *file_name, const char *str)
 		nptrs -= 2;
 		for (i = 1; i < nptrs; i++)
 			log_message(LOG_INFO, "  %s", strs[i]);
-		free(strs);
+		free(strs);	/* malloc'd by backtrace_symbols */
 	}
+
+	/* gstack() gives a more detailed stacktrace, using gdb and the bt command */
+	sprintf(cmd, "gstack %d >>%s", getpid(), file_name ? file_name : KA_TMP_DIR "/keepalived.stack");
+	system(cmd);
 }
 #endif
 
@@ -278,7 +280,7 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 
 		/* Child */
 		if (!pid) {
-			char buf[9];
+			char buf[PID_MAX_DIGITS + 1];
 
 			snprintf(buf, sizeof buf, "%d", getppid());
 			execlp("perf", "perf", "record", "-p", buf, "-q", "-g", "--call-graph", "fp", NULL);
@@ -286,8 +288,8 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 		}
 
 		/* Parent */
-		char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
-		struct inotify_event *ie = (struct inotify_event*)buf;
+		char buf[sizeof(struct inotify_event) + NAME_MAX + 1] __attribute__((aligned(__alignof__(struct inotify_event))));
+		struct inotify_event *ie = PTR_CAST(struct inotify_event, buf);
 		struct epoll_event ee = { .events = EPOLLIN, .data.fd = in };
 
 		if ((ep = epoll_create(1)) == -1) {
@@ -386,7 +388,7 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 
 	/* mop up an odd byte, if necessary */
 	if (nleft == 1)
-		sum += htons(*(const u_char *)w << 8);
+		sum += htons(*PTR_CAST_CONST(u_char, w) << 8);
 
 	if (acc)
 		*acc = sum;
@@ -400,15 +402,14 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 	return (answer);
 }
 
-/* IP network to ascii representation */
+/* IP network to ascii representation - address is in network byte order */
 const char *
 inet_ntop2(uint32_t ip)
 {
 	static char buf[16];
-	const unsigned char *bytep;
+	const unsigned char (*bytep)[4] = (unsigned char (*)[4])&ip;
 
-	bytep = (const unsigned char *)&ip;
-	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
+	sprintf(buf, "%d.%d.%d.%d", (*bytep)[0], (*bytep)[1], (*bytep)[2], (*bytep)[3]);
 	return buf;
 }
 
@@ -422,7 +423,7 @@ inet_ntoa2(uint32_t ip, char *buf)
 {
 	const unsigned char *bytep;
 
-	bytep = (const unsigned char *)&ip;
+	bytep = PTR_CAST_CONST(unsigned char, &ip);
 	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
 	return buf;
 }
@@ -467,9 +468,9 @@ inet_stor(const char *addr, uint32_t *range_end)
 		return true;
 
 #ifdef _STRICT_CONFIG_
-        return false;
+	return false;
 #else
-        return !__test_bit(CONFIG_TEST_BIT, &debug);
+	return !__test_bit(CONFIG_TEST_BIT, &debug);
 #endif
 }
 
@@ -494,16 +495,18 @@ domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage
 
 	addr->ss_family = (sa_family_t)res->ai_family;
 
-	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
-		*addr6 = *(struct sockaddr_in6 *)res->ai_addr;
-		if (port)
-			addr6->sin6_port = htons(port_num);
-	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
-		*addr4 = *(struct sockaddr_in *)res->ai_addr;
-		if (port)
-			addr4->sin_port = htons(port_num);
+	/* Tempting as it is to do something like:
+	 *	*(struct sockaddr_in6 *)addr = *(struct sockaddr_in6 *)res->ai_addr;
+	 *  the alignment of struct sockaddr (short int) is less than the alignment of
+	 *  struct sockaddr_storage (long).
+	 */
+	memcpy(addr, res->ai_addr, res->ai_addrlen);
+
+	if (port) {
+		if (addr->ss_family == AF_INET6)
+			PTR_CAST(struct sockaddr_in6, addr)->sin6_port = htons(port_num);
+		else
+			PTR_CAST(struct sockaddr_in, addr)->sin_port = htons(port_num);
 	}
 
 	freeaddrinfo(res);
@@ -532,12 +535,12 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 	}
 
 	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 		if (port)
 			addr6->sin6_port = htons(port_num);
 		addr_ip = &addr6->sin6_addr;
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 		if (port)
 			addr4->sin_port = htons(port_num);
 		addr_ip = &addr4->sin_addr;
@@ -551,7 +554,7 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 	res = inet_pton(addr->ss_family, ip_str ? ip_str : ip, addr_ip);
 
 	if (ip_str)
-		free(ip_str);
+		FREE(ip_str);
 
 	if (!res) {
 		addr->ss_family = AF_UNSPEC;
@@ -565,7 +568,7 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 void
 inet_ip4tosockaddr(const struct in_addr *sin_addr, struct sockaddr_storage *addr)
 {
-	struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+	struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 	addr4->sin_family = AF_INET;
 	addr4->sin_addr = *sin_addr;
 }
@@ -574,7 +577,7 @@ inet_ip4tosockaddr(const struct in_addr *sin_addr, struct sockaddr_storage *addr
 void
 inet_ip6tosockaddr(const struct in6_addr *sin_addr, struct sockaddr_storage *addr)
 {
-	struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+	struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 	addr6->sin6_family = AF_INET6;
 	addr6->sin6_addr = *sin_addr;
 }
@@ -628,10 +631,10 @@ inet_sockaddrtos2(const struct sockaddr_storage *addr, char *addr_str)
 	const void *addr_ip;
 
 	if (addr->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *) addr;
+		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
 		addr_ip = &addr6->sin6_addr;
 	} else {
-		const struct sockaddr_in *addr4 = (const struct sockaddr_in *) addr;
+		const struct sockaddr_in *addr4 = PTR_CAST_CONST(struct sockaddr_in, addr);
 		addr_ip = &addr4->sin_addr;
 	}
 
@@ -653,13 +656,13 @@ uint16_t __attribute__ ((pure))
 inet_sockaddrport(const struct sockaddr_storage *addr)
 {
 	if (addr->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *) addr;
+		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
 		return addr6->sin6_port;
 	}
 
 	/* Note: this might be AF_UNSPEC if it is the sequence number of
 	 * a virtual server in a virtual server group */
-	const struct sockaddr_in *addr4 = (const struct sockaddr_in *) addr;
+	const struct sockaddr_in *addr4 = PTR_CAST_CONST(struct sockaddr_in, addr);
 	return addr4->sin_port;
 }
 
@@ -667,10 +670,10 @@ void
 inet_set_sockaddrport(struct sockaddr_storage *addr, uint16_t port)
 {
 	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 		addr6->sin6_port = port;
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 		addr4->sin_port = port;
 	}
 }
@@ -720,7 +723,7 @@ inet_sockaddrip4(const struct sockaddr_storage *addr)
 	if (addr->ss_family != AF_INET)
 		return 0xffffffff;
 
-	return ((const struct sockaddr_in *) addr)->sin_addr.s_addr;
+	return PTR_CAST_CONST(struct sockaddr_in, addr)->sin_addr.s_addr;
 }
 
 int
@@ -729,7 +732,7 @@ inet_sockaddrip6(const struct sockaddr_storage *addr, struct in6_addr *ip6)
 	if (addr->ss_family != AF_INET6)
 		return -1;
 
-	*ip6 = ((const struct sockaddr_in6 *) addr)->sin6_addr;
+	*ip6 = PTR_CAST_CONST(struct sockaddr_in6, addr)->sin6_addr;
 	return 0;
 }
 
@@ -740,7 +743,7 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 	int64_t addr_diff;
 
 	if (family == AF_INET) {
-		addr_diff = (int64_t)ntohl(*((const uint32_t *) a)) - (int64_t)ntohl(*((const uint32_t *) b));
+		addr_diff = (int64_t)ntohl(*PTR_CAST_CONST(uint32_t, a)) - (int64_t)ntohl(*PTR_CAST_CONST(uint32_t, b));
 		if (addr_diff > 0)
 			return 1;
 		if (addr_diff < 0)
@@ -752,7 +755,7 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 		int i;
 
 		for (i = 0; i < 4; i++ ) {
-			addr_diff = (int64_t)ntohl(((const uint32_t *) (a))[i]) - (int64_t)ntohl(((const uint32_t *) (b))[i]);
+			addr_diff = (int64_t)ntohl(PTR_CAST_CONST(uint32_t, (a))[i]) - (int64_t)ntohl(PTR_CAST_CONST(uint32_t, (b))[i]);
 			if (addr_diff > 0)
 				return 1;
 			if (addr_diff < 0)
@@ -772,12 +775,12 @@ inet_sockaddrcmp(const struct sockaddr_storage *a, const struct sockaddr_storage
 
 	if (a->ss_family == AF_INET)
 		return inet_inaddrcmp(a->ss_family,
-				      &((const struct sockaddr_in *) a)->sin_addr,
-				      &((const struct sockaddr_in *) b)->sin_addr);
+				      &PTR_CAST_CONST(struct sockaddr_in, a)->sin_addr,
+				      &PTR_CAST_CONST(struct sockaddr_in, b)->sin_addr);
 	if (a->ss_family == AF_INET6)
 		return inet_inaddrcmp(a->ss_family,
-				      &((const struct sockaddr_in6 *) a)->sin6_addr,
-				      &((const struct sockaddr_in6 *) b)->sin6_addr);
+				      &PTR_CAST_CONST(const struct sockaddr_in6, a)->sin6_addr,
+				      &PTR_CAST_CONST(const struct sockaddr_in6, b)->sin6_addr);
 	return 0;
 }
 
@@ -855,6 +858,12 @@ format_mac_buf(char *op, size_t op_len, const unsigned char *addr, size_t addr_l
 {
 	size_t i;
 	char *buf_end = op + op_len;
+
+	/* If there is no address, clear the op buffer */
+	if (!addr_len && op_len) {
+		op[0] = '\0';
+		return;
+	}
 
 	for (i = 0; i < addr_len; i++)
 		op += snprintf(op, buf_end - op, "%.2x%s",
@@ -1043,8 +1052,6 @@ set_std_fd(bool force)
 		}
 	}
 
-	signal_fd_close(STDERR_FILENO+1);
-
 	/* coverity[leaked_handle] */
 }
 
@@ -1055,54 +1062,6 @@ close_std_fd(void)
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);
 }
-
-#if !defined _HAVE_LIBIPTC_ || defined _LIBIPTC_DYNAMIC_
-int
-fork_exec(const char * const argv[])
-{
-	pid_t pid;
-	int ret_pid;
-	int status;
-	struct sigaction act, old_act;
-	int res = 0;
-	union non_const_args args;
-
-	act.sa_handler = SIG_DFL;
-	sigemptyset(&act.sa_mask);
-	act.sa_flags = 0;
-
-	sigaction(SIGCHLD, &act, &old_act);
-
-#ifdef ENABLE_LOG_TO_FILE
-	if (log_file_name)
-		flush_log_file();
-#endif
-
-	pid = local_fork();
-	if (pid < 0)
-		res = -1;
-	else if (pid == 0) {
-		/* Child */
-		set_std_fd(false);
-
-		signal_handler_script();
-
-		args.args = argv;       /* Note: we are casting away constness, since execvp parameter type is wrong */
-		execvp(*argv, args.execve_args);
-		exit(EXIT_FAILURE);
-	} else {
-		/* Parent */
-		while ((ret_pid = waitpid(pid, &status, 0)) == -1 && check_EINTR(errno));
-
-		if (ret_pid != pid || !WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS)
-			res = -1;
-	}
-
-	sigaction(SIGCHLD, &old_act, NULL);
-
-	return res;
-}
-#endif
 
 #if defined _WITH_VRRP_ || defined _WITH_BFD_
 int
@@ -1149,7 +1108,7 @@ memcmp_constant_time(const void *s1, const void *s2, size_t n)
  * Utility functions coming from Wensong code
  */
 
-#if defined _WITH_LVS_ || defined _LIBIPSET_DYNAMIC_
+#if defined _WITH_LVS_ || defined _HAVE_LIBIPSET_
 static char*
 get_modprobe(void)
 {

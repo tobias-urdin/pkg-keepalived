@@ -25,10 +25,12 @@
 
 /* system includes */
 #include <stdbool.h>
+#include <stdint.h>
 
 /* local includes */
 #include "check_data.h"
 #include "check_api.h"
+#include "utils.h"
 
 /* UP & DOWN value */
 #define UP   true
@@ -41,14 +43,20 @@
 #define LVS_CMD_DEL_DEST	IP_VS_SO_SET_DELDEST
 #define LVS_CMD_EDIT_DEST	IP_VS_SO_SET_EDITDEST
 
+static inline bool __attribute((pure))
+rs_iseq(const real_server_t *rs_a, const real_server_t *rs_b)
+{
+	return sockstorage_equal(&rs_a->addr, &rs_b->addr);
+}
+
 /* prototypes */
-extern void update_svr_wgt(int, virtual_server_t *, real_server_t *, bool);
+extern void update_svr_wgt(int64_t, virtual_server_t *, real_server_t *, bool);
 extern void set_checker_state(checker_t *, bool);
 extern void update_svr_checker_state(bool, checker_t *);
 extern bool init_services(void);
 extern void clear_services(void);
 extern void set_quorum_states(void);
-extern void clear_diff_services(list);
+extern void clear_diff_services(list_head_t *);
 extern void check_new_rs_state(void);
 extern void link_vsg_to_vs(void);
 

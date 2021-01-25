@@ -45,18 +45,11 @@
 #include "scheduler.h"
 #endif
 
-static int misc_check_thread(thread_ref_t);
-static int misc_check_child_thread(thread_ref_t);
+static void misc_check_thread(thread_ref_t);
+static void misc_check_child_thread(thread_ref_t);
 
 static bool script_user_set;
 static misc_checker_t *new_misck_checker;
-static bool have_dynamic_misc_checker;
-
-void
-clear_dynamic_misc_check_flag(void)
-{
-	have_dynamic_misc_checker = false;
-}
 
 /* Configuration stream handling */
 static void
@@ -73,36 +66,59 @@ static void
 dump_misc_check(FILE *fp, const checker_t *checker)
 {
 	const misc_checker_t *misck_checker = checker->data;
+	char time_str[26];
 
 	conf_write(fp, "   Keepalive method = MISC_CHECK");
 	conf_write(fp, "   script = %s", cmd_str(&misck_checker->script));
 	conf_write(fp, "   timeout = %lu", misck_checker->timeout/TIMER_HZ);
 	conf_write(fp, "   dynamic = %s", misck_checker->dynamic ? "YES" : "NO");
 	conf_write(fp, "   uid:gid = %u:%u", misck_checker->script.uid, misck_checker->script.gid);
-	dump_checker_opts(fp, checker);
+	ctime_r(&misck_checker->last_ran.tv_sec, time_str);
+	conf_write(fp, "   Last ran = %ld.%6.6ld (%.24s.%6.6ld)", misck_checker->last_ran.tv_sec, misck_checker->last_ran.tv_usec, time_str, misck_checker->last_ran.tv_usec);
+	conf_write(fp, "   Last status = %u", misck_checker->last_exit_code);
 }
 
 static bool
-misc_check_compare(const checker_t *old_c, const checker_t *new_c)
+compare_misc_check(const checker_t *old_c, checker_t *new_c)
 {
 	const misc_checker_t *old = old_c->data;
 	const misc_checker_t *new = new_c->data;
 
+	if (new->dynamic != old->dynamic)
+		return false;
+
 	return notify_script_compare(&old->script, &new->script);
 }
+
+static void
+migrate_misc_check(checker_t *new_c, const checker_t *old_c)
+{
+	const misc_checker_t *old = old_c->data;
+	misc_checker_t *new = new_c->data;
+
+	new->last_exit_code = old->last_exit_code;
+	new->last_ran = old->last_ran;
+
+	if (!new->dynamic || old->last_exit_code == 1)
+		return;
+
+	new_c->cur_weight = new->last_exit_code - (new->last_exit_code ? 2 : 0) - new_c->rs->iweight;
+}
+
+static const checker_funcs_t misc_checker_funcs = { CHECKER_MISC, free_misc_check, dump_misc_check, compare_misc_check, migrate_misc_check };
 
 static void
 misc_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	checker_t *checker;
 
-	new_misck_checker = (misc_checker_t *) MALLOC(sizeof (misc_checker_t));
+	PMALLOC(new_misck_checker);
 	new_misck_checker->state = SCRIPT_STATE_IDLE;
 
 	script_user_set = false;
 
 	/* queue new checker */
-	checker = queue_checker(free_misc_check, dump_misc_check, misc_check_thread, misc_check_compare, new_misck_checker, NULL, false);
+	checker = queue_checker(&misc_checker_funcs, misc_check_thread, new_misck_checker, NULL, false);
 
 	/* Set non-standard default value */
 	checker->default_retry = 0;
@@ -147,11 +163,6 @@ misc_dynamic_handler(__attribute__((unused)) const vector_t *strvec)
 		return;
 
 	new_misck_checker->dynamic = true;
-
-	if (have_dynamic_misc_checker)
-		report_config_error(CONFIG_GENERAL_ERROR, "Warning - more than one dynamic misc checker per real server will cause problems");
-	else
-		have_dynamic_misc_checker = true;
 }
 
 static void
@@ -219,23 +230,16 @@ install_misc_check_keyword(void)
 }
 
 /* Check that the scripts are secure */
-int
+unsigned
 check_misc_script_security(magic_t magic)
 {
-	element e, next;
-	checker_t *checker;
+	checker_t *checker, *checker_tmp;
 	misc_checker_t *misc_script;
-	int script_flags = 0;
-	int flags;
+	unsigned script_flags = 0;
+	unsigned flags;
 	bool insecure;
 
-	if (LIST_ISEMPTY(checkers_queue))
-		return 0;
-
-	for (e = LIST_HEAD(checkers_queue); e; e = next) {
-		next = e->next;
-		checker = ELEMENT_DATA(e);
-
+	list_for_each_entry_safe(checker, checker_tmp, &checkers_queue, e_list) {
 		if (checker->launch != misc_check_thread)
 			continue;
 
@@ -258,14 +262,14 @@ check_misc_script_security(magic_t magic)
 
 		if (insecure) {
 			/* Remove the script */
-			free_list_element(checkers_queue, e);
+			free_checker(checker);
 		}
 	}
 
 	return script_flags;
 }
 
-static int
+static void
 misc_check_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
@@ -282,7 +286,7 @@ misc_check_thread(thread_ref_t thread)
 		/* Register next timer checker */
 		thread_add_timer(thread->master, misc_check_thread, checker,
 				 checker->delay_loop);
-		return 0;
+		return;
 	}
 
 	/* Execute the script in a child process. Parent returns, child doesn't */
@@ -293,11 +297,9 @@ misc_check_thread(thread_ref_t thread)
 		misck_checker->last_ran = time_now;
 		misck_checker->state = SCRIPT_STATE_RUNNING;
 	}
-
-	return ret;
 }
 
-static int
+static void
 misc_check_child_thread(thread_ref_t thread)
 {
 	int wait_status;
@@ -337,7 +339,7 @@ misc_check_child_thread(thread_ref_t thread)
 		if (timeout) {
 			/* If kill returns an error, we can't kill the process since either the process has terminated,
 			 * or we don't have permission. If we can't kill it, there is no point trying again. */
-			if (!kill(-pid, sig_num)) {
+			if (kill(-pid, sig_num)) {
 				if (errno == ESRCH) {
 					/* The process does not exist, and we should
 					 * have reaped its exit status, otherwise it
@@ -358,14 +360,14 @@ misc_check_child_thread(thread_ref_t thread)
 		if (timeout)
 			thread_add_child(thread->master, misc_check_child_thread, checker, pid, timeout * TIMER_HZ);
 
-		return 0;
+		return;
 	}
 
 	wait_status = THREAD_CHILD_STATUS(thread);
 
 	if (WIFEXITED(wait_status)) {
 		unsigned status = WEXITSTATUS(wait_status);
-		unsigned effective_weight;
+		int64_t effective_weight;
 
 		if (status == 0 ||
 		    (misck_checker->dynamic && status >= 2 && status <= 255)) {
@@ -374,13 +376,11 @@ misc_check_child_thread(thread_ref_t thread)
 			 * the exit status returned.  Effective range is 0..253.
 			 * Catch legacy case of status being 0 but misc_dynamic being set.
 			 */
-			if (status >= 2)
-				effective_weight = status - 2;
-			else
-				effective_weight = checker->rs->iweight;
 			if (status != misck_checker->last_exit_code) {
-				update_svr_wgt(effective_weight, checker->vs,
-					       checker->rs, true);
+				effective_weight = checker->rs->effective_weight - checker->cur_weight;
+				checker->cur_weight = status ? status - 2 - checker->rs->iweight : 0;
+				effective_weight += checker->cur_weight;
+				update_svr_wgt(effective_weight, checker->vs, checker->rs, true);
 				misck_checker->last_exit_code = status;
 			}
 
@@ -401,9 +401,11 @@ misc_check_child_thread(thread_ref_t thread)
 				if (global_data->checker_log_all_failures || checker->log_all_failures)
 					message_only = true;
 				else
-					script_exit_type = NULL;
+					script_exit_type = NULL; /* this disables all message handling */
 			} else {
 				checker->retry_it = 0;
+				checker->rs->effective_weight -= checker->cur_weight;
+				checker->cur_weight = 0;
 				misck_checker->last_exit_code = status;
 			}
 		}
@@ -435,18 +437,31 @@ misc_check_child_thread(thread_ref_t thread)
 				if (global_data->checker_log_all_failures || checker->log_all_failures)
 					message_only = true;
 				else
-					script_exit_type = NULL;
+					script_exit_type = NULL; /* this disables all message handling */
 			} else
 				checker->retry_it = 0;
 		}
 	}
 
-	if (script_exit_type) {
+	if (script_exit_type) { /* not the case if retry check will follow and log_all_failures unset */
 		char message[40];
 
-		if (!script_success && checker->retry)
-			snprintf(message, sizeof(message), " after %u retries", checker->retry);
-		else
+		if (!script_success) {
+			/*
+			 * retry is always the fixed value of config parameter retry
+			 * If retry > 0 then on the regulary scheduled check fail retry_it is 1, on the first retry check fail retry_it is 2 and so on
+			 * but on the last retry check fail, retry_it is 0
+			 */
+			if (checker->retry) {
+				if (checker->retry_it == 1) /* failed regulary scheduled check */
+					snprintf(message, sizeof(message), ", will do %u %s", checker->retry, checker->retry == 1 ? "retry" : "retries");
+				else if (checker->retry_it > 1) /* failed retry check, but not the last */
+					snprintf(message, sizeof(message), " on retry %u/%u", checker->retry_it - 1, checker->retry);
+				else /* failed last retry check */
+					snprintf(message, sizeof(message), " after %u %s", checker->retry, checker->retry == 1 ? "retry" : "retries" );
+			} else /* retry 0 */
+				snprintf(message, sizeof(message), " with retry disabled");
+		} else
 			message[0] = '\0';
 
 		if (reason)
@@ -469,6 +484,8 @@ misc_check_child_thread(thread_ref_t thread)
 		if (!message_only) {
 			rs_was_alive = checker->rs->alive;
 			update_svr_checker_state(script_success ? UP : DOWN, checker);
+			if (!script_success)
+				checker->cur_weight = 0;
 
 			if (checker->rs->smtp_alert &&
 			    (rs_was_alive != checker->rs->alive || !global_data->no_checker_emails)) {
@@ -490,8 +507,6 @@ misc_check_child_thread(thread_ref_t thread)
 	misck_checker->state = SCRIPT_STATE_IDLE;
 
 	checker->has_run = true;
-
-	return 0;
 }
 
 #ifdef THREAD_DUMP

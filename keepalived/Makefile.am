@@ -4,7 +4,8 @@
 #
 # Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
 
-AM_CPPFLAGS		= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
+AM_CPPFLAGS		= -I $(top_srcdir)/keepalived/include -I $(top_srcdir)/lib
+AM_CPPFLAGS		+= $(KA_CPPFLAGS) $(DEBUG_CPPFLAGS)
 AM_CFLAGS		= $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS		= $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
@@ -14,15 +15,17 @@ edit = echo "  EDIT     $@"; \
 	 -e 's|@sbindir[@]|$(sbindir)|g' \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
-	 -e 's|@PID_DIR[@]|$(PID_DIR)|g' \
-	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g'
+	 -e 's|@RUN_DIR[@]|$(RUN_DIR)|g' \
+	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g' \
+	 -e 's|@SYSTEMD_SERVICE_TYPE[@]|$(SYSTEMD_SERVICE_TYPE)|g'
 
 sbin_PROGRAMS		= keepalived
 keepalived_SOURCES	= main.c
 
 noinst_HEADERS		= $(srcdir)/include/*.h
 
-AM_CPPFLAGS		+= -I$(srcdir)/include -I $(top_srcdir)/lib
+TRACKER_SUBDIR		= trackers
+TRACKER_LIB		= trackers/libtracker.a
 
 if WITH_IPVS
   IPVS_SUBDIR		= check
@@ -49,11 +52,11 @@ keepalived.service: Makefile
 
 keepalived.service: $(srcdir)/keepalived.service.in
 
-SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) etc
+SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) $(TRACKER_SUBDIR) etc
 
 EXTRA_DIST		= keepalived.service.in
 
-keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcore.a ../lib/liblib.a $(KA_LIBS)
+keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcore.a $(TRACKER_LIB) ../lib/liblib.a $(KA_LIBS)
 
 MOSTLYCLEANFILES	= keepalived.service
 
@@ -61,9 +64,6 @@ MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
 
 sysconfigdir		= $(sysconfdir)/sysconfig
 sysconfig_DATA		= etc/sysconfig/keepalived
-
-configdir		= $(sysconfdir)/@PACKAGE@
-config_DATA		= etc/keepalived/keepalived.conf
 
 if INIT_SYSTEMD
 systemdsystemunit_DATA	= keepalived.service

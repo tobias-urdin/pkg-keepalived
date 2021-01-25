@@ -47,6 +47,9 @@ enum daemon_bits {
 #define SET_RELOAD      (reload = 1)
 #define UNSET_RELOAD    (reload = 0)
 
+/* Special pseudo-pointer to indicate default reload file */
+#define DEFAULT_RELOAD_FILE		((void *)1)
+
 /* Global vars exported */
 extern const char *version_string;	/* keepalived version */
 extern unsigned long daemon_mode;	/* Which child processes are run */
@@ -73,7 +76,7 @@ extern const char *main_pidfile;	/* overrule default pidfile */
 extern bool snmp_option;		/* Enable SNMP support */
 extern const char *snmp_socket;		/* Socket to use for SNMP agent */
 #endif
-extern bool use_pid_dir;		/* pid files in /var/run/keepalived */
+extern bool use_pid_dir;		/* pid files in /run/keepalived */
 extern unsigned os_major;		/* Kernel version */
 extern unsigned os_minor;
 extern unsigned os_release;
@@ -88,7 +91,9 @@ extern bool running_vrrp(void) __attribute__ ((pure));
 extern bool running_checker(void) __attribute__ ((pure));
 #endif
 
-extern void stop_keepalived(void);
+#ifdef THREAD_DUMP
+extern void thread_dump_signal(void *, int);
+#endif
 extern void initialise_debug_options(void);
 extern int keepalived_main(int, char**); /* The "real" main function */
 

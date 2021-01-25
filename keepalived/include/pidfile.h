@@ -28,15 +28,15 @@
 #include <paths.h>
 
 /* lock pidfile */
-#if defined PID_DIR_ROOT
-#define	PID_DIR			PID_DIR_ROOT "/run/"
+#if defined RUN_DIR_ROOT
+#define	RUN_DIR			RUN_DIR_ROOT "/run/"
 #elif defined GNU_STD_PATHS
-#define PID_DIR			LOCAL_STATE_DIR "/run/"
+#define RUN_DIR			LOCAL_STATE_DIR "/run/"
 #else
-#define PID_DIR			_PATH_VARRUN
+#define RUN_DIR			_PATH_VARRUN
 #endif
 
-#define KEEPALIVED_PID_DIR	PID_DIR PACKAGE "/"
+#define KEEPALIVED_PID_DIR	RUN_DIR PACKAGE "/"
 #define KEEPALIVED_PID_FILE	PACKAGE
 
 #ifdef _WITH_VRRP_
@@ -49,13 +49,15 @@
 #define BFD_PID_FILE		"bfd"
 #endif
 #define	PID_EXTENSION		".pid"
+#define	RELOAD_EXTENSION	".reload"
 
 extern const char *pid_directory;
 
 /* Prototypes */
 extern void create_pid_dir(void);
 extern void remove_pid_dir(void);
-extern int pidfile_write(const char *, int);
+extern char *make_pidfile_name(const char *, const char *, const char *);
+extern bool pidfile_write(const char *, int);
 extern void pidfile_rm(const char *);
 extern bool keepalived_running(unsigned long);
 

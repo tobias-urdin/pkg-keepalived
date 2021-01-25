@@ -34,9 +34,10 @@
 /* local includes */
 #include "vrrp.h"
 #include "vrrp_if.h"
-#include "list.h"
+#include "list_head.h"
 #include "vector.h"
 #include "vrrp_static_track.h"
+#include "utils.h"
 
 /* types definition */
 typedef struct _ip_address {
@@ -60,6 +61,7 @@ typedef struct _ip_address {
 	uint8_t			flagmask;		/* Bitmaps of flags set */
 #endif
 	bool			have_peer;
+	bool			use_vmac;
 	union {
 		struct in_addr sin_addr;
 		struct in6_addr sin6_addr;
@@ -76,6 +78,10 @@ typedef struct _ip_address {
 	bool			nftable_rule_set;	/* TRUE if in nftables set */
 #endif
 	bool			garp_gna_pending;	/* Is a gratuitous ARP/NA message still to be sent */
+	uint32_t		preferred_lft;		/* IPv6 preferred_lft (0 means address deprecated) */
+
+	/* linked list member */
+	list_head_t		e_list;
 } ip_address_t;
 
 #define IPADDRESS_DEL 0
@@ -84,27 +90,51 @@ typedef struct _ip_address {
 
 /* Macro definition */
 #define IP_FAMILY(X)	(X)->ifa.ifa_family
-#define IP_IS6(X)	((X)->ifa.ifa_family == AF_INET6)
-#define IP_IS4(X)	((X)->ifa.ifa_family == AF_INET)
+#define	IP_IS6(X)	((X)->ifa.ifa_family == AF_INET6)
 
-#define IPcommon_ISEQ(X,Y) \
-			((X)->ifa.ifa_prefixlen     == (Y)->ifa.ifa_prefixlen		&& \
-			 !(X)->ifp                  == !(Y)->ifp                        && \
-			 (!(X)->ifp                                                     || \
-			  (X)->ifp->ifindex	    == (Y)->ifp->ifindex)		&& \
-			 (X)->ifa.ifa_scope	    == (Y)->ifa.ifa_scope		&& \
-			 string_equal((X)->label, (Y)->label))
+static inline bool
+IP_ISEQ(ip_address_t *X, const ip_address_t *Y)
+{
+	if (!X && !Y)
+		return true;
 
-#define IP4_ISEQ(X,Y)   ((X)->u.sin.sin_addr.s_addr == (Y)->u.sin.sin_addr.s_addr	&& \
-			 IPcommon_ISEQ((X),(Y)))
+	if (!X != !Y ||
+	    X->ifa.ifa_family != Y->ifa.ifa_family)
+		return false;
 
-#define IP6_ISEQ(X,Y)   ((X)->u.sin6_addr.s6_addr32[0] == (Y)->u.sin6_addr.s6_addr32[0]	&& \
-			 (X)->u.sin6_addr.s6_addr32[1] == (Y)->u.sin6_addr.s6_addr32[1]	&& \
-			 (X)->u.sin6_addr.s6_addr32[2] == (Y)->u.sin6_addr.s6_addr32[2]	&& \
-			 (X)->u.sin6_addr.s6_addr32[3] == (Y)->u.sin6_addr.s6_addr32[3]	&& \
-			 IPcommon_ISEQ((X),(Y)))
+	if (X->ifa.ifa_prefixlen != Y->ifa.ifa_prefixlen ||
+// We can't check ifp here and later. On a reload, has ifp been set up by now?
+//	    !X->ifp != !Y->ifp ||
+#ifdef _HAVE_VRRP_VMAC_
+	    X->use_vmac != Y->use_vmac ||
+#endif
+	    X->ifa.ifa_scope != Y->ifa.ifa_scope)
+		return false;
 
-#define IP_ISEQ(X,Y)    (!(X) && !(Y) ? true : !(X) != !(Y) ? false : (IP_FAMILY(X) != IP_FAMILY(Y) ? false : IP_IS6(X) ? IP6_ISEQ(X, Y) : IP4_ISEQ(X, Y)))
+	if (X->ifp &&
+#ifdef _HAVE_VRRP_VMAC_
+	    X->ifp->base_ifp != Y->ifp->base_ifp
+#else
+	    X->ifp != Y->ifp
+#endif
+				)
+		return false;
+
+	if (!string_equal(X->label, Y->label))
+		return false;
+
+	if (X->ifa.ifa_family == AF_INET6)
+		return X->u.sin6_addr.s6_addr32[0] == Y->u.sin6_addr.s6_addr32[0] &&
+			X->u.sin6_addr.s6_addr32[1] == Y->u.sin6_addr.s6_addr32[1] &&
+			X->u.sin6_addr.s6_addr32[2] == Y->u.sin6_addr.s6_addr32[2] &&
+			X->u.sin6_addr.s6_addr32[3] == Y->u.sin6_addr.s6_addr32[3];
+
+	return X->u.sin.sin_addr.s_addr == Y->u.sin.sin_addr.s_addr;
+}
+
+#define CLEAR_IP6_ADDR(X) ((X)->s6_addr32[0] = (X)->s6_addr32[1] = (X)->s6_addr32[2] = (X)->s6_addr32[3] = 0)
+
+#define	IPADDRESSTOS_BUF_LEN	(INET6_ADDRSTRLEN + 4)     /* allow for subnet */
 
 /* Forward reference */
 struct ipt_handle;
@@ -112,16 +142,18 @@ struct ipt_handle;
 /* prototypes */
 extern const char *ipaddresstos(char *, const ip_address_t *);
 extern int netlink_ipaddress(ip_address_t *, int);
-extern bool netlink_iplist(list, int, bool);
-extern void free_ipaddress(void *);
+extern bool netlink_iplist(list_head_t *, int, bool);
+extern void free_ipaddress(ip_address_t *);
+extern void free_ipaddress_list(list_head_t *);
 extern void format_ipaddress(const ip_address_t *, char *, size_t);
-extern void dump_ipaddress(FILE *, const void *);
+extern void dump_ipaddress(FILE *, const ip_address_t *);
+extern void dump_ipaddress_list(FILE *, const list_head_t *);
 extern ip_address_t *parse_ipaddress(ip_address_t *, const char *, bool);
 extern ip_address_t *parse_route(const char *);
-extern void alloc_ipaddress(list, const vector_t *, const interface_t *, bool);
-extern void get_diff_address(vrrp_t *, vrrp_t *, list);
-extern void clear_address_list(list, bool);
-extern void clear_diff_saddresses(void);
+extern void alloc_ipaddress(list_head_t *, const vector_t *, bool);
+extern void get_diff_address(vrrp_t *, vrrp_t *, list_head_t *);
+extern void clear_address_list(list_head_t *, bool);
+extern void clear_diff_static_addresses(void);
 extern void reinstate_static_address(ip_address_t *);
 
 #endif

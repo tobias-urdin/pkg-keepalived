@@ -41,7 +41,7 @@
 #include "scheduler.h"
 #endif
 
-static int tcp_connect_thread(thread_ref_t);
+static void tcp_connect_thread(thread_ref_t);
 
 /* Configuration stream handling */
 static void
@@ -52,24 +52,24 @@ free_tcp_check(checker_t *checker)
 }
 
 static void
-dump_tcp_check(FILE *fp, const checker_t *checker)
+dump_tcp_check(FILE *fp, __attribute__((unused)) const checker_t *checker)
 {
 	conf_write(fp, "   Keepalive method = TCP_CHECK");
-	dump_checker_opts(fp, checker);
 }
 
 static bool
-tcp_check_compare(const checker_t *old_c, const checker_t *new_c)
+compare_tcp_check(const checker_t *old_c, checker_t *new_c)
 {
 	return compare_conn_opts(old_c->co, new_c->co);
 }
+
+static const checker_funcs_t tcp_checker_funcs = { CHECKER_TCP, free_tcp_check, dump_tcp_check, compare_tcp_check, NULL };
 
 static void
 tcp_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	/* queue new checker */
-	queue_checker(free_tcp_check, dump_tcp_check, tcp_connect_thread,
-		      tcp_check_compare, NULL, CHECKER_NEW_CO(), true);
+	queue_checker(&tcp_checker_funcs, tcp_connect_thread, NULL, CHECKER_NEW_CO(), true);
 }
 
 static void
@@ -114,7 +114,7 @@ tcp_epilog(thread_ref_t thread, bool is_success)
 			    (rs_was_alive != checker->rs->alive || !global_data->no_checker_emails))
 				smtp_alert(SMTP_MSG_RS, checker, NULL,
 					   "=> TCP CHECK succeed on service <=");
-		} else if (!is_success && 
+		} else if (!is_success &&
 			   (checker->is_up || !checker->has_run)) {
 			if (checker->retry && checker->has_run)
 				log_message(LOG_INFO
@@ -144,7 +144,7 @@ tcp_epilog(thread_ref_t thread, bool is_success)
 	thread_add_timer(thread->master, tcp_connect_thread, checker, delay);
 }
 
-static int
+static void
 tcp_check_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
@@ -166,7 +166,7 @@ tcp_check_thread(thread_ref_t thread)
 	case connect_timeout:
 		if (checker->is_up &&
 		    (global_data->checker_log_all_failures || checker->log_all_failures))
-			log_message(LOG_INFO, "TCP connection to %s timedout."
+			log_message(LOG_INFO, "TCP connection to %s timeout."
 					, FMT_CHK(checker));
 		tcp_epilog(thread, false);
 		break;
@@ -177,11 +177,9 @@ tcp_check_thread(thread_ref_t thread)
 					, FMT_CHK(checker));
 		tcp_epilog(thread, false);
 	}
-
-	return 0;
 }
 
-static int
+static void
 tcp_connect_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
@@ -196,7 +194,7 @@ tcp_connect_thread(thread_ref_t thread)
 	if (!checker->enabled) {
 		thread_add_timer(thread->master, tcp_connect_thread, checker,
 				 checker->delay_loop);
-		return 0;
+		return;
 	}
 
 	if ((fd = socket(co->dst.ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP)) == -1) {
@@ -204,7 +202,7 @@ tcp_connect_thread(thread_ref_t thread)
 		thread_add_timer(thread->master, tcp_connect_thread, checker,
 				checker->delay_loop);
 
-		return 0;
+		return;
 	}
 
 #if !HAVE_DECL_SOCK_NONBLOCK
@@ -232,8 +230,6 @@ tcp_connect_thread(thread_ref_t thread)
 					checker->delay_loop);
 		}
 	}
-
-	return 0;
 }
 
 #ifdef THREAD_DUMP

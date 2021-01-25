@@ -63,45 +63,27 @@ static size_t getpwnam_buf_len;
 static char *path;
 static bool path_is_malloced;
 
-/* The priority this process is running at */
-static int cur_prio = INT_MAX;
-
 /* Buffer for expanding notify script commands */
 static char cmd_str_buf[MAXBUF];
 
 static bool
-set_privileges(uid_t uid, gid_t gid)
+set_script_env(uid_t uid, gid_t gid)
 {
-	int retval;
-
-	/* Ensure we receive SIGTERM if our parent process dies */
-	prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-	/* If we have increased our priority, set it to default for the script */
-	if (cur_prio != INT_MAX)
-		cur_prio = getpriority(PRIO_PROCESS, 0);
-	if (cur_prio < 0)
-		setpriority(PRIO_PROCESS, 0, 0);
-
-	/* Drop our privileges if configured */
 	if (gid) {
-		retval = setgid(gid);
-		if (retval < 0) {
+		if (setgid(gid) < 0) {
 			log_message(LOG_ALERT, "Couldn't setgid: %u (%m)", gid);
 			return true;
 		}
 
 		/* Clear any extra supplementary groups */
-		retval = setgroups(1, &gid);
-		if (retval < 0) {
+		if (setgroups(1, &gid) < 0) {
 			log_message(LOG_ALERT, "Couldn't setgroups: %u (%m)", gid);
 			return true;
 		}
 	}
 
 	if (uid) {
-		retval = setuid(uid);
-		if (retval < 0) {
+		if (setuid(uid) < 0) {
 			log_message(LOG_ALERT, "Couldn't setuid: %u (%m)", uid);
 			return true;
 		}
@@ -164,35 +146,54 @@ cmd_str(const notify_script_t *script)
 	return cmd_str_r(script, cmd_str_buf, sizeof cmd_str_buf);
 }
 
-/* Execute external script/program to process FIFO */
-static pid_t
-notify_fifo_exec(thread_master_t *m, int (*func) (thread_ref_t), void *arg, notify_script_t *script)
+int
+system_call_script(thread_master_t *m, thread_func_t func, void * arg, unsigned long timer, const notify_script_t* script)
 {
 	pid_t pid;
+	const char *str;
 	int retval;
-	const char *scr;
 	union non_const_args args;
 
-	pid = local_fork();
+	/* Daemonization to not degrade our scheduling timer */
+#ifdef ENABLE_LOG_TO_FILE
+	if (log_file_name)
+		flush_log_file();
+#endif
 
-	/* In case of fork is error. */
+	pid = fork();
+
 	if (pid < 0) {
+		/* fork error */
 		log_message(LOG_INFO, "Failed fork process");
 		return -1;
 	}
 
-	/* In case of this is parent process */
 	if (pid) {
-		thread_add_child(m, func, arg, pid, TIMER_NEVER);
+		/* parent process */
+		if (func) {
+			thread_add_child(m, func, arg, pid, timer);
+#ifdef _SCRIPT_DEBUG_
+			if (do_script_debug)
+				log_message(LOG_INFO, "Running script %s with pid %d, timer %lu.%6.6lu", script->args[0], pid, timer / TIMER_HZ, timer % TIMER_HZ);
+#endif
+		}
+
 		return 0;
 	}
+
+	/* Child process */
+	reset_process_priorities();
 
 #ifdef _MEM_CHECK_
 	skip_mem_dump();
 #endif
 
+	if (set_script_env(script->uid, script->gid))
+		exit(0);
+
+	/* Move us into our own process group, so if the script needs to be killed
+	 * all its child processes will also be killed. */
 	setpgid(0, 0);
-	set_privileges(script->uid, script->gid);
 
 	if (script->flags & SC_EXECABLE) {
 		/* If keepalived dies, we want the script to die */
@@ -201,30 +202,47 @@ notify_fifo_exec(thread_master_t *m, int (*func) (thread_ref_t), void *arg, noti
 		args.args = script->args;	/* Note: we are casting away constness, since execve parameter type is wrong */
 		execve(script->args[0], args.execve_args, environ);
 
-		if (errno == EACCES)
-			log_message(LOG_INFO, "FIFO notify script %s is not executable", script->args[0]);
-		else
-			log_message(LOG_INFO, "Unable to execute FIFO notify script %s - errno %d - %m", script->args[0], errno);
-	}
-	else {
-		retval = system(scr = cmd_str(script));
+		/* error */
+		log_message(LOG_ALERT, "Error exec-ing command '%s', error %d: %m", script->args[0], errno);
+	} else {
+		retval = system(str = cmd_str(script));
 
-		if (retval == 127) {
-			/* couldn't exec command */
-			log_message(LOG_ALERT, "Couldn't exec FIFO command: %s", scr);
+		if (retval == -1) {
+			log_message(LOG_ALERT, "Error exec-ing command: %s", str);
+			exit(0);
 		}
-		else if (retval == -1)
-			log_message(LOG_ALERT, "Error exec-ing FIFO command: %s", scr);
 
-		exit(0);
+		if (WIFEXITED(retval)) {
+			if (WEXITSTATUS(retval) == 127) {
+				/* couldn't find command */
+				log_message(LOG_ALERT, "Couldn't find command: %s", str);
+			}
+			else if (WEXITSTATUS(retval) == 126) {
+				/* couldn't find command */
+				log_message(LOG_ALERT, "Couldn't execute command: %s", str);
+			}
+			else
+				exit(WEXITSTATUS(retval));
+
+			exit(0);
+		}
+
+		if (WIFSIGNALED(retval))
+			kill(getpid(), WTERMSIG(retval));
 	}
 
-	/* unreached unless error */
-	exit(0);
+	exit(0); /* Script errors aren't server errors */
+}
+
+/* Execute external script/program */
+int
+notify_exec(const notify_script_t *script)
+{
+	return system_call_script(NULL, NULL, NULL, 0, script);
 }
 
 static void
-fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *type)
+fifo_open(notify_fifo_t* fifo, thread_func_t script_exit, const char *type)
 {
 	int ret;
 	int sav_errno;
@@ -247,7 +265,7 @@ fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *typ
 		if (!sav_errno || sav_errno == EEXIST) {
 			/* Run the notify script if there is one */
 			if (fifo->script)
-				notify_fifo_exec(master, script_exit, fifo, fifo->script);
+				system_call_script(master, script_exit, fifo, TIMER_NEVER, fifo->script);
 
 			/* Now open the fifo */
 			if ((fifo->fd = open(fifo->name, O_RDWR | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)) == -1) {
@@ -267,7 +285,7 @@ fifo_open(notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *typ
 }
 
 void
-notify_fifo_open(notify_fifo_t* global_fifo, notify_fifo_t* fifo, int (*script_exit)(thread_ref_t), const char *type)
+notify_fifo_open(notify_fifo_t* global_fifo, notify_fifo_t* fifo, thread_func_t script_exit, const char *type)
 {
 	/* Open the global FIFO if specified */
 	if (global_fifo->name)
@@ -298,134 +316,7 @@ notify_fifo_close(notify_fifo_t* global_fifo, notify_fifo_t* fifo)
 	fifo_close(fifo);
 }
 
-/* perform a system call */
-static void __attribute__ ((noreturn))
-system_call(const notify_script_t* script)
-{
-	char *command_line = NULL;
-	const char *str;
-	int retval;
-	union non_const_args args;
-
-	if (set_privileges(script->uid, script->gid))
-		exit(0);
-
-	/* Move us into our own process group, so if the script needs to be killed
-	 * all its child processes will also be killed. */
-	setpgid(0, 0);
-
-	if (script->flags & SC_EXECABLE) {
-		/* If keepalived dies, we want the script to die */
-		prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-		args.args = script->args;	/* Note: we are casting away constness, since execve parameter type is wrong */
-		execve(script->args[0], args.execve_args, environ);
-
-		/* error */
-		log_message(LOG_ALERT, "Error exec-ing command '%s', error %d: %m", script->args[0], errno);
-	}
-	else {
-		retval = system(str = cmd_str(script));
-
-		if (retval == -1)
-			log_message(LOG_ALERT, "Error exec-ing command: %s", str);
-		else if (WIFEXITED(retval)) {
-			if (WEXITSTATUS(retval) == 127) {
-				/* couldn't find command */
-				log_message(LOG_ALERT, "Couldn't find command: %s", str);
-			}
-			else if (WEXITSTATUS(retval) == 126) {
-				/* couldn't find command */
-				log_message(LOG_ALERT, "Couldn't execute command: %s", str);
-			}
-		}
-
-		if (command_line)
-			FREE(command_line);
-
-		if (retval == -1 ||
-		    (WIFEXITED(retval) && (WEXITSTATUS(retval) == 126 || WEXITSTATUS(retval) == 127)))
-			exit(0);
-		if (WIFEXITED(retval))
-			exit(WEXITSTATUS(retval));
-		if (WIFSIGNALED(retval))
-			kill(getpid(), WTERMSIG(retval));
-		exit(0);
-	}
-
-	exit(0);
-}
-
-/* Execute external script/program */
-int
-notify_exec(const notify_script_t *script)
-{
-	pid_t pid;
-
-#ifdef ENABLE_LOG_TO_FILE
-	if (log_file_name)
-		flush_log_file();
-#endif
-
-	pid = local_fork();
-
-	if (pid < 0) {
-		/* fork error */
-		log_message(LOG_INFO, "Failed fork process");
-		return -1;
-	}
-
-	if (pid) {
-		/* parent process */
-		return 0;
-	}
-
-#ifdef _MEM_CHECK_
-	skip_mem_dump();
-#endif
-
-	system_call(script);
-
-	/* We should never get here */
-	exit(0);
-}
-
-int
-system_call_script(thread_master_t *m, int (*func) (thread_ref_t), void * arg, unsigned long timer, notify_script_t* script)
-{
-	pid_t pid;
-
-	/* Daemonization to not degrade our scheduling timer */
-#ifdef ENABLE_LOG_TO_FILE
-	if (log_file_name)
-		flush_log_file();
-#endif
-
-	pid = local_fork();
-
-	if (pid < 0) {
-		/* fork error */
-		log_message(LOG_INFO, "Failed fork process");
-		return -1;
-	}
-
-	if (pid) {
-		/* parent process */
-		thread_add_child(m, func, arg, pid, timer);
-		return 0;
-	}
-
-	/* Child process */
-#ifdef _MEM_CHECK_
-	skip_mem_dump();
-#endif
-
-	system_call(script);
-
-	exit(0); /* Script errors aren't server errors */
-}
-
-int
+void
 child_killed_thread(thread_ref_t thread)
 {
 	thread_master_t *m = thread->master;
@@ -438,8 +329,6 @@ child_killed_thread(thread_ref_t thread)
 	 * termination process */
 	if (!&m->child.rb_root.rb_node && !m->shutdown_timer_running)
 		thread_add_terminate_event(m);
-
-	return 0;
 }
 
 void
@@ -513,10 +402,10 @@ replace_cmd_name(notify_script_t *script, const char *new_path)
 	len = strlen(new_path) + 1;
 	while (*wp)
 		len += strlen(*wp++) + 1;
-	num_words = (script->args[0] - (const char *)&script->args[0]) - 1;
+	num_words = (script->args[0] - PTR_CAST_CONST(char, &script->args[0])) - 1;
 
 	params = word_ptrs = MALLOC((num_words + 1) * sizeof(char *) + len);
-	words = (char *)&params[num_words + 1];
+	words = PTR_CAST(char, &params[num_words + 1]);
 
 	strcpy(words, new_path);
 	*(word_ptrs++) = words;
@@ -795,20 +684,21 @@ check_security(const char *filename, bool using_script_security)
 	return flags;
 }
 
-int
+unsigned
 check_script_secure(notify_script_t *script,
 #ifndef _HAVE_LIBMAGIC_
 					     __attribute__((unused))
 #endif
 								     magic_t magic)
 {
-	int flags;
+	unsigned flags;
 	int ret, ret_real, ret_new;
 	struct stat file_buf, real_buf;
 	bool need_script_protection = false;
 	uid_t old_uid = 0;
 	gid_t old_gid = 0;
 	char *new_path;
+	char *sav_path;
 	int sav_errno;
 	char *real_file_path;
 	char *orig_file_part, *new_file_part;
@@ -866,6 +756,12 @@ check_script_secure(notify_script_t *script,
 		return SC_NOTFOUND;
 	}
 
+	/* It is much easier to ensure that new_path is part of
+	 * keepalived's malloc handling. */
+	sav_path = new_path;
+	new_path = STRDUP(new_path);
+	free(sav_path);	/* malloc'd returned by realpath() */
+
 	real_file_path = NULL;
 
 	orig_file_part = strrchr(script->args[0], '/');
@@ -897,15 +793,12 @@ check_script_secure(notify_script_t *script,
 		}
 
 		if (strcmp(script->args[0], new_path)) {
-	 		/* We need to set up all the args again */
+			/* We need to set up all the args again */
 			replace_cmd_name(script, new_path);
 		}
 	}
 
-	if (!real_file_path)
-		free(new_path);
-	else
-		FREE(new_path);
+	FREE(new_path);
 
 	/* Get the permissions for the file itself */
 	if (stat(real_file_path ? real_file_path : script->args[0], &file_buf)) {
@@ -940,7 +833,7 @@ check_script_secure(notify_script_t *script,
 
 	if (!need_script_protection) {
 		if (real_file_path)
-			free(real_file_path);
+			FREE(real_file_path);
 
 		return flags;
 	}
@@ -950,16 +843,16 @@ check_script_secure(notify_script_t *script,
 
 	if (real_file_path) {
 		flags |= check_security(real_file_path, script_security);
-		free(real_file_path);
+		FREE(real_file_path);
 	}
 
 	return flags;
 }
 
-int
+unsigned
 check_notify_script_secure(notify_script_t **script_p, magic_t magic)
 {
-	int flags;
+	unsigned flags;
 	notify_script_t *script = *script_p;
 
 	if (!script)
@@ -1113,7 +1006,7 @@ set_script_params_array(const vector_t *strvec, notify_script_t *script, unsigne
 
 	/* Allocate memory for pointers to words and words themselves */
 	word_ptrs = MALLOC((num_words + extra_params + 1) * sizeof(char *) + len);
-	words = (char *)word_ptrs + (num_words + extra_params + 1) * sizeof(char *);
+	words = PTR_CAST(char, word_ptrs) + (num_words + extra_params + 1) * sizeof(char *);
 	args.params = word_ptrs;
 	script->args = args.cparams;
 

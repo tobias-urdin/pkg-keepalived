@@ -31,9 +31,11 @@
 #ifdef _WITH_SNMP_
 #include <sys/select.h>
 #endif
+#ifdef THREAD_DUMP
+#include <stdio.h>
+#endif
 
 #include "timer.h"
-#include "list.h"
 #include "list_head.h"
 #include "rbtree.h"
 
@@ -47,7 +49,7 @@ typedef enum {
 #define THREAD_MAX_WAITING THREAD_CHILD
 	THREAD_UNUSED,		/* thread_master.unuse list_head */
 
-	/* The following are all on the thread_master.next list_head */
+	/* The following are all on the thread_master.e_list list_head */
 	THREAD_READY,
 	THREAD_EVENT,
 	THREAD_WRITE_TIMEOUT,
@@ -56,7 +58,8 @@ typedef enum {
 	THREAD_CHILD_TERMINATED,
 	THREAD_TERMINATE_START,
 	THREAD_TERMINATE,
-	THREAD_READY_FD,
+	THREAD_READY_READ_FD,
+	THREAD_READY_WRITE_FD,
 	THREAD_READ_ERROR,
 	THREAD_WRITE_ERROR,
 #ifdef USE_SIGNAL_THREADS
@@ -78,7 +81,7 @@ enum thread_flags {
 
 typedef struct _thread thread_t;
 typedef const thread_t * thread_ref_t;
-typedef int (*thread_func_t)(thread_ref_t);
+typedef void (*thread_func_t)(thread_ref_t);
 
 /* Thread itself. */
 struct _thread {
@@ -103,7 +106,7 @@ struct _thread {
 
 	union {
 		rb_node_t n;
-		list_head_t next;
+		list_head_t e_list;
 	};
 
 	rb_node_t rb_data;		/* PID or fd/vrid */
@@ -127,10 +130,12 @@ typedef struct _thread_master {
 	rb_root_cached_t	child;
 	list_head_t		event;
 #ifdef USE_SIGNAL_THREADS
-	list_head_t 		signal;
+	list_head_t		signal;
 #endif
 	list_head_t		ready;
 	list_head_t		unuse;
+
+	thread_t		*current_thread;
 
 	/* child process related */
 	rb_root_t		child_pid;
@@ -163,7 +168,7 @@ typedef struct _thread_master {
 	bool			shutdown_timer_running;
 } thread_master_t;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 typedef enum {
 	PROG_TYPE_PARENT,
 #ifdef _WITH_VRRP_
@@ -188,19 +193,22 @@ typedef enum {
 #define THREAD_CHILD_STATUS(X) ((X)->u.c.status)
 
 /* Exit codes */
-#define KEEPALIVED_EXIT_OK			EXIT_SUCCESS
-#define KEEPALIVED_EXIT_NO_MEMORY		(EXIT_FAILURE  )
-#define KEEPALIVED_EXIT_FATAL			(EXIT_FAILURE+1)
-#define KEEPALIVED_EXIT_CONFIG			(EXIT_FAILURE+2)
-#define KEEPALIVED_EXIT_CONFIG_TEST		(EXIT_FAILURE+3)
-#define KEEPALIVED_EXIT_CONFIG_TEST_SECURITY	(EXIT_FAILURE+4)
-#define KEEPALIVED_EXIT_NO_CONFIG		(EXIT_FAILURE+5)
+enum exit_code {
+	KEEPALIVED_EXIT_OK = EXIT_SUCCESS,
+	KEEPALIVED_EXIT_NO_MEMORY = EXIT_FAILURE,
+	KEEPALIVED_EXIT_PROGRAM_ERROR,
+	KEEPALIVED_EXIT_FATAL,
+	KEEPALIVED_EXIT_CONFIG,
+	KEEPALIVED_EXIT_CONFIG_TEST,
+	KEEPALIVED_EXIT_CONFIG_TEST_SECURITY,
+	KEEPALIVED_EXIT_NO_CONFIG,
+} ;
 
 #define DEFAULT_CHILD_FINDER ((void *)1)
 
 /* global vars exported */
 extern thread_master_t *master;
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 extern prog_type_t prog_type;		/* Parent/VRRP/Checker process */
 #endif
 #ifdef _WITH_SNMP_
@@ -212,12 +220,18 @@ extern bool do_epoll_debug;
 #ifdef _EPOLL_THREAD_DUMP_
 extern bool do_epoll_thread_dump;
 #endif
+#ifdef _SCRIPT_DEBUG_
+extern bool do_script_debug;
+#endif
 
 /* Prototypes. */
 extern void set_child_finder_name(char const * (*)(pid_t));
 extern void save_cmd_line_options(int, char * const *);
+extern char * const * get_cmd_line_options(int *);
 extern void log_command_line(unsigned);
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
+extern unsigned calc_restart_delay(const timeval_t *, unsigned *, const char *);
+extern void log_child_died(const char *, pid_t);
 extern bool report_child_status(int, pid_t, const char *);
 #endif
 extern thread_master_t *thread_make_master(void);
@@ -230,10 +244,10 @@ extern void thread_cleanup_master(thread_master_t *);
 extern void thread_destroy_master(thread_master_t *);
 extern thread_ref_t thread_add_read_sands(thread_master_t *, thread_func_t, void *, int, const timeval_t *, bool);
 extern thread_ref_t thread_add_read(thread_master_t *, thread_func_t, void *, int, unsigned long, bool);
-extern int thread_del_read(thread_ref_t);
+extern void thread_del_read(thread_ref_t);
 extern void thread_requeue_read(thread_master_t *, int, const timeval_t *);
 extern thread_ref_t thread_add_write(thread_master_t *, thread_func_t, void *, int, unsigned long, bool);
-extern int thread_del_write(thread_ref_t);
+extern void thread_del_write(thread_ref_t);
 extern void thread_close_fd(thread_ref_t);
 extern thread_ref_t thread_add_timer(thread_master_t *, thread_func_t, void *, unsigned long);
 extern void timer_thread_update_timeout(thread_ref_t, unsigned long);
@@ -244,13 +258,17 @@ extern thread_ref_t thread_add_event(thread_master_t *, thread_func_t, void *, i
 extern void thread_cancel(thread_ref_t);
 extern void thread_cancel_read(thread_master_t *, int);
 #ifdef _WITH_SNMP_
-extern int snmp_timeout_thread(thread_ref_t);
-extern void snmp_epoll_reset(thread_master_t *);
+extern void snmp_timeout_thread(thread_ref_t);
+extern void snmp_epoll_info(thread_master_t *);
+extern void snmp_epoll_clear(thread_master_t *);
 #endif
 extern void process_threads(thread_master_t *);
 extern void thread_child_handler(void *, int);
 extern void thread_add_base_threads(thread_master_t *, bool);
 extern void launch_thread_scheduler(thread_master_t *);
+#ifndef _ONE_PROCESS_DEBUG
+extern void register_shutdown_function(void (*)(int));
+#endif
 #ifdef THREAD_DUMP
 extern const char *get_signal_function_name(void (*)(void *, int));
 extern void register_signal_handler_address(const char *, void (*)(void *, int));

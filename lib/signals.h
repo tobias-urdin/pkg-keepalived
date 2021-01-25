@@ -31,6 +31,11 @@
 
 #include "scheduler.h"
 
+#ifdef THREAD_DUMP
+#define	SIGTDUMP	(SIGRTMAX)
+#endif
+#define	SIGSTATS_CLEAR	(SIGRTMAX - 1)
+
 static inline int
 sigmask_func(int how, const sigset_t *set, sigset_t *oldset)
 {
@@ -53,8 +58,6 @@ extern void cancel_signal_read_thread(void);
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 extern void set_sigxcpu_handler(void);
 #endif
-
-extern void signal_fd_close(int);
 
 #ifdef THREAD_DUMP
 extern void register_signal_thread_addresses(void);

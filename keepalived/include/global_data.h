@@ -29,10 +29,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <sys/socket.h>
-
-#ifdef _HAVE_SCHED_RT_
 #include <sched.h>
-#endif
 
 #ifdef HAVE_LINUX_NETFILTER_X_TABLES_H
 #include <linux/netfilter/x_tables.h>
@@ -51,7 +48,7 @@
 #endif
 
 /* local includes */
-#include "list.h"
+#include "list_head.h"
 #include "vrrp_if.h"
 #include "timer.h"
 #ifdef _WITH_VRRP_
@@ -59,12 +56,9 @@
 #endif
 #ifdef _WITH_LVS_
 #include "ipvswrapper.h"
+#include "libipvs.h"
 #endif
 #include "notify.h"
-
-#ifndef _HAVE_LIBIPTC_
-#define	XT_EXTENSION_MAXNAMELEN		29
-#endif
 
 /* constants */
 #define DEFAULT_SMTP_CONNECTION_TIMEOUT (30 * TIMER_HZ)
@@ -75,9 +69,16 @@
 #define RX_BUFS_SIZE			0x04
 #endif
 
+#ifdef _WITH_LVS_
+#define LVS_MAX_TIMEOUT			(86400*31)      /* 31 days */
+#endif
+
 /* email link list */
 typedef struct _email {
 	char				*addr;
+
+	/* Linked list member */
+	list_head_t			e_list;
 } email_t;
 
 #ifdef _WITH_LVS_
@@ -90,7 +91,7 @@ typedef enum {
 
 /* Configuration data root */
 typedef struct _data {
-	const char 			*process_name;
+	const char			*process_name;
 #ifdef _WITH_VRRP_
 	const char			*vrrp_process_name;
 #endif
@@ -101,8 +102,9 @@ typedef struct _data {
 	const char			*bfd_process_name;
 #endif
 #if HAVE_DECL_CLONE_NEWNET
-	const char			*network_namespace;	/* network namespace name */
-	bool				namespace_with_ipsets;	/* override for namespaces with ipsets on Linux < 3.13 */
+	const char			*network_namespace;		/* network namespace name */
+	const char			*network_namespace_ipvs;	/* network namespace name for ipvs */
+	bool				namespace_with_ipsets;		/* override for namespaces with ipsets on Linux < 3.13 */
 #endif
 	const char			*local_name;
 	const char			*instance_name;		/* keepalived instance name */
@@ -114,8 +116,21 @@ typedef struct _data {
 	struct sockaddr_storage		smtp_server;
 	const char			*smtp_helo_name;
 	unsigned long			smtp_connection_to;
-	list				email;
+	list_head_t			email;
 	int				smtp_alert;
+	notify_script_t			*startup_script;
+	unsigned			startup_script_timeout;
+	notify_script_t			*shutdown_script;
+	unsigned			shutdown_script_timeout;
+#ifndef _ONE_PROCESS_DEBUG_
+	const char			*reload_check_config;	/* log file name for validating new configuration before reloading */
+	const char			*reload_time_file;
+	bool				reload_repeat;
+	time_t				reload_time;
+	bool				reload_date_specified;
+	const char			*reload_file;
+#endif
+	const char 			*config_directory;
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
 	bool				allow_if_changes;
@@ -123,22 +138,21 @@ typedef struct _data {
 	int				smtp_alert_vrrp;
 	const char			*default_ifname;	/* Name of default interface */
 	interface_t			*default_ifp;		/* Default interface for static addresses */
+	bool				disable_local_igmp;
 #endif
 #ifdef _WITH_LVS_
-	int				lvs_tcp_timeout;
-	int				lvs_tcpfin_timeout;
-	int				lvs_udp_timeout;
+	ipvs_timeout_t			lvs_timeouts;
 	int				smtp_alert_checker;
 	bool				checker_log_all_failures;
-#ifdef _WITH_VRRP_
 	struct lvs_syncd_config		lvs_syncd;
-#endif
 	bool				lvs_flush;		/* flush any residual LVS config at startup */
-	lvs_flush_t			lvs_flush_onstop;	/* flush any LVS config at shutdown */
+	lvs_flush_t			lvs_flush_on_stop;	/* flush any LVS config at shutdown */
 #endif
+	int				max_auto_priority;
+	long				min_auto_priority_delay;
 #ifdef _WITH_VRRP_
-	struct sockaddr_in		vrrp_mcast_group4;
-	struct sockaddr_in6		vrrp_mcast_group6;
+	struct sockaddr_in6		vrrp_mcast_group6 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
+	struct sockaddr_in		vrrp_mcast_group4 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
 	unsigned			vrrp_garp_delay;
 	timeval_t			vrrp_garp_refresh;
 	unsigned			vrrp_garp_rep;
@@ -147,20 +161,24 @@ typedef struct _data {
 	unsigned			vrrp_garp_lower_prio_rep;
 	unsigned			vrrp_garp_interval;
 	unsigned			vrrp_gna_interval;
+#ifdef _HAVE_VRRP_VMAC_
+	unsigned			vrrp_vmac_garp_intvl;
+	bool				vrrp_vmac_garp_all_if;
+#endif
 	bool				vrrp_lower_prio_no_advert;
 	bool				vrrp_higher_prio_send_advert;
 	int				vrrp_version;		/* VRRP version (2 or 3) */
 #ifdef _WITH_IPTABLES_
-	char				vrrp_iptables_inchain[XT_EXTENSION_MAXNAMELEN];
-	char				vrrp_iptables_outchain[XT_EXTENSION_MAXNAMELEN];
+	const char			*vrrp_iptables_inchain;
+	const char			*vrrp_iptables_outchain;
 #ifdef _HAVE_LIBIPSET_
-	bool				using_ipsets;
-	char				vrrp_ipset_address[IPSET_MAXNAMELEN];
-	char				vrrp_ipset_address6[IPSET_MAXNAMELEN];
-	char				vrrp_ipset_address_iface6[IPSET_MAXNAMELEN];
+	unsigned			using_ipsets;
+	const char			*vrrp_ipset_address;
+	const char			*vrrp_ipset_address6;
+	const char			*vrrp_ipset_address_iface6;
 #ifdef HAVE_IPSET_ATTR_IFACE
-	char				vrrp_ipset_igmp[IPSET_MAXNAMELEN];
-	char				vrrp_ipset_mld[IPSET_MAXNAMELEN];
+	const char			*vrrp_ipset_igmp;
+	const char			*vrrp_ipset_mld;
 #endif
 #endif
 #endif
@@ -169,7 +187,6 @@ typedef struct _data {
 	int				vrrp_nf_chain_priority;
 	bool				vrrp_nf_counters;
 	bool				vrrp_nf_ifindex;
-	unsigned			nft_version;
 #endif
 	bool				vrrp_check_unicast_src;
 	bool				vrrp_skip_check_adv_addr;
@@ -177,36 +194,30 @@ typedef struct _data {
 	bool				have_vrrp_config;
 	char				vrrp_process_priority;
 	bool				vrrp_no_swap;
-#ifdef _HAVE_SCHED_RT_
 	unsigned			vrrp_realtime_priority;
 	cpu_set_t			vrrp_cpu_mask;
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				vrrp_rlimit_rt;
 #endif
 #endif
-#endif
 #ifdef _WITH_LVS_
 	bool				have_checker_config;
 	char				checker_process_priority;
 	bool				checker_no_swap;
-#ifdef _HAVE_SCHED_RT_
 	unsigned			checker_realtime_priority;
 	cpu_set_t			checker_cpu_mask;
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				checker_rlimit_rt;
 #endif
 #endif
-#endif
 #ifdef _WITH_BFD_
 	bool				have_bfd_config;
 	char				bfd_process_priority;
 	bool				bfd_no_swap;
-#ifdef _HAVE_SCHED_RT_
 	unsigned			bfd_realtime_priority;
 	cpu_set_t			bfd_cpu_mask;
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 	rlim_t				bfd_rlimit_rt;
-#endif
 #endif
 #endif
 	notify_fifo_t			notify_fifo;
@@ -267,6 +278,10 @@ typedef struct _data {
 	int				vrrp_rx_bufs_multiples;
 	unsigned			vrrp_startup_delay;
 	bool				log_unknown_vrids;
+#ifdef _HAVE_VRRP_VMAC_
+	const char			*vmac_prefix;
+	const char			*vmac_addr_prefix;
+#endif
 #endif
 } data_t;
 

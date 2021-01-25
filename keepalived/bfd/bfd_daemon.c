@@ -39,7 +39,6 @@
 #include "pidfile.h"
 #include "logger.h"
 #include "signals.h"
-#include "list.h"
 #include "main.h"
 #include "parser.h"
 #include "time.h"
@@ -52,6 +51,10 @@
 #ifdef _WITH_CN_PROC_
 #include "track_process.h"
 #endif
+#ifdef _USE_SYSTEMD_
+#include "systemd.h"
+#endif
+
 
 /* Global variables */
 int bfd_vrrp_event_pipe[2] = { -1, -1};
@@ -60,8 +63,10 @@ int bfd_checker_event_pipe[2] = { -1, -1};
 /* Local variables */
 static const char *bfd_syslog_ident;
 
-#ifndef _DEBUG_
-static int reload_bfd_thread(thread_ref_t);
+#ifndef _ONE_PROCESS_DEBUG_
+static void reload_bfd_thread(thread_ref_t);
+static timeval_t bfd_start_time;
+static unsigned bfd_next_restart_delay;
 #endif
 
 /* Daemon stop sequence */
@@ -105,7 +110,7 @@ stop_bfd(int status)
 	FREE_CONST_PTR(bfd_syslog_ident);
 #else
 	if (bfd_syslog_ident)
-		free(no_const_char_p(bfd_syslog_ident));
+		free(no_const_char_p(bfd_syslog_ident));	/* malloc'd by make_syslog_ident() */
 #endif
 	close_std_fd();
 
@@ -113,15 +118,14 @@ stop_bfd(int status)
 }
 
 /* Daemon init sequence */
-void
+bool
 open_bfd_pipes(void)
 {
 #ifdef _WITH_VRRP_
 	/* Open BFD VRRP control pipe */
 	if (open_pipe(bfd_vrrp_event_pipe) == -1) {
 		log_message(LOG_ERR, "Unable to create BFD vrrp event pipe: %m");
-		stop_keepalived();
-		return;
+		return false;
 	}
 #endif
 
@@ -129,10 +133,11 @@ open_bfd_pipes(void)
 	/* Open BFD checker control pipe */
 	if (open_pipe(bfd_checker_event_pipe) == -1) {
 		log_message(LOG_ERR, "Unable to create BFD checker event pipe: %m");
-		stop_keepalived();
-		return;
+		return false;
 	}
 #endif
+
+	return true;
 }
 
 /* Daemon init sequence */
@@ -150,7 +155,7 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 
 	alloc_bfd_buffer();
 
-	init_data(conf_file, bfd_init_keywords);
+	init_data(conf_file, bfd_init_keywords, false);
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -164,7 +169,14 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* If we are just testing the configuration, then we terminate now */
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
+
 	bfd_complete_init();
+
+	if (global_data->reload_check_config && get_config_status() != CONFIG_OK) {
+		stop_bfd(KEEPALIVED_EXIT_CONFIG);
+		return;
+	}
+
 
 	/* Post initializations */
 #ifdef _MEM_CHECK_
@@ -179,18 +191,14 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* Set the process priority and non swappable if configured */
 // TODO - measure max stack usage
 	set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
-			global_data->bfd_realtime_priority,
+			global_data->bfd_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 			global_data->bfd_rlimit_rt,
 #endif
-#endif
 			global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
 
-#ifdef _HAVE_SCHED_RT_
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->bfd_cpu_mask, "bfd");
-#endif
 }
 
 void
@@ -199,13 +207,27 @@ bfd_validate_config(void)
 	start_bfd(NULL);
 }
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
+static void
+print_bfd_thread(__attribute__((unused)) thread_ref_t thread)
+{
+	bfd_print_data();
+}
+
 /* Reload handler */
 static void
 sigreload_bfd(__attribute__ ((unused)) void *v,
 	   __attribute__ ((unused)) int sig)
 {
 	thread_add_event(master, reload_bfd_thread, NULL, 0);
+}
+
+static void
+sigdump_bfd(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+{
+	log_message(LOG_INFO, "Printing BFD data for process(%d) on signal",
+		    getpid());
+	thread_add_event(master, print_bfd_thread, NULL, 0);
 }
 
 /* Terminate handler */
@@ -224,11 +246,15 @@ bfd_signal_init(void)
 	signal_set(SIGHUP, sigreload_bfd, NULL);
 	signal_set(SIGINT, sigend_bfd, NULL);
 	signal_set(SIGTERM, sigend_bfd, NULL);
+	signal_set(SIGUSR1, sigdump_bfd, NULL);
+#ifdef THREAD_DUMP
+	signal_set(SIGTDUMP, thread_dump_signal, NULL);
+#endif
 	signal_ignore(SIGPIPE);
 }
 
 /* Reload thread */
-static int
+static void
 reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	timeval_t timer;
@@ -263,33 +289,47 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 
 	set_time_now();
 	log_message(LOG_INFO, "Reload finished in %lu usec", -timer_long(timer_sub_now(timer)));
-
-	return 0;
 }
 
-/* BFD Child respawning thread */
-static int
+/* This function runs in the parent process. */
+static void
+delayed_restart_bfd_child_thread(__attribute__((unused)) thread_ref_t thread)
+{
+	start_bfd_child();
+}
+
+/* BFD Child respawning thread. This function runs in the parent process. */
+static void
 bfd_respawn_thread(thread_ref_t thread)
 {
+	unsigned restart_delay;
+
 	/* We catch a SIGCHLD, handle it */
 	bfd_child = 0;
 
-	if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning", thread->u.c.pid);
-		start_bfd_child();
+	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
+		thread_add_terminate_event(thread->master);
+	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
+		log_child_died("BFD", thread->u.c.pid);
+
+		restart_delay = calc_restart_delay(&bfd_start_time, &bfd_next_restart_delay, "BFD");
+		if (!restart_delay)
+			start_bfd_child();
+		else
+			thread_add_timer(thread->master, delayed_restart_bfd_child_thread, NULL, restart_delay * TIMER_HZ);
 	} else {
 		log_message(LOG_ALERT, "BFD child process(%d) died: Exiting", thread->u.c.pid);
 		raise(SIGTERM);
 	}
-	return 0;
 }
-#endif
 
-#ifndef _DEBUG_
 #ifdef THREAD_DUMP
 static void
 register_bfd_thread_addresses(void)
 {
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
+
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 
@@ -297,8 +337,10 @@ register_bfd_thread_addresses(void)
 
 	register_thread_address("bfd_dispatcher_init", bfd_dispatcher_init);
 	register_thread_address("reload_bfd_thread", reload_bfd_thread);
+	register_thread_address("print_bfd_thread", print_bfd_thread);
 
 	register_signal_handler_address("sigreload_bfd", sigreload_bfd);
+	register_signal_handler_address("sigdump_bfd", sigdump_bfd);
 	register_signal_handler_address("sigend_bfd", sigend_bfd);
 	register_signal_handler_address("thread_child_handler", thread_child_handler);
 }
@@ -308,7 +350,7 @@ register_bfd_thread_addresses(void)
 int
 start_bfd_child(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	pid_t pid;
 	int ret;
 	const char *syslog_ident;
@@ -326,6 +368,8 @@ start_bfd_child(void)
 		return -1;
 	} else if (pid) {
 		bfd_child = pid;
+		bfd_start_time = time_now;
+
 		log_message(LOG_INFO, "Starting BFD child process, pid=%d",
 			    pid);
 
@@ -334,6 +378,7 @@ start_bfd_child(void)
 				 pid, TIMER_NEVER);
 		return 0;
 	}
+
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
 	prog_type = PROG_TYPE_BFD;
@@ -387,6 +432,9 @@ start_bfd_child(void)
 	/* Clear any child finder functions set in parent */
 	set_child_finder_name(NULL);
 
+	/* Create an independant file descriptor for the shared config file */
+	separate_config_file();
+
 	/* Child process part, write pidfile */
 	if (!pidfile_write(bfd_pidfile, getpid())) {
 		/* Fatal error */
@@ -394,6 +442,10 @@ start_bfd_child(void)
 			    "BFD child process: cannot write pidfile");
 		exit(0);
 	}
+
+#ifdef _USE_SYSTEMD_
+	systemd_unset_notify();
+#endif
 
 	/* Create the new master thread */
 	thread_destroy_master(master);
@@ -411,15 +463,18 @@ start_bfd_child(void)
 	 */
 	UNSET_RELOAD;
 
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	bfd_signal_init();
+
+	/* Register emergency shutdown function */
+	register_shutdown_function(stop_bfd);
 #endif
 
 	/* Start BFD daemon */
 	start_bfd(NULL);
 
-#ifdef _DEBUG_
+#ifdef _ONE_PROCESS_DEBUG_
 	return 0;
 #else
 
@@ -446,8 +501,9 @@ start_bfd_child(void)
 void
 register_bfd_parent_addresses(void)
 {
-#ifndef _DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("bfd_respawn_thread", bfd_respawn_thread);
+	register_thread_address("delayed_restart_bfd_child_thread", delayed_restart_bfd_child_thread);
 #endif
 }
 #endif

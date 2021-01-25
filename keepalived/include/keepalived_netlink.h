@@ -37,6 +37,7 @@
 #ifdef _WITH_VRRP_
 #include "vrrp_if.h"
 #endif
+#include "align.h"
 
 /* types definitions */
 typedef struct _nl_handle {
@@ -54,7 +55,7 @@ typedef struct _nl_handle {
 #define SOL_NETLINK 270
 #endif
 
-#define RTA_TAIL(rta)	((struct rtattr *)(((char *) (rta)) + RTA_ALIGN((rta)->rta_len)))
+#define RTA_TAIL(rta)	PTR_CAST(struct rtattr, (char *)(rta) + RTA_ALIGN((rta)->rta_len))
 
 /* Global vars exported */
 #ifdef _WITH_VRRP_
@@ -139,6 +140,7 @@ extern void kernel_netlink_set_recv_bufs(void);
 extern void set_extra_netlink_monitoring(bool, bool, bool, bool);
 #endif
 extern void kernel_netlink_init(void);
+extern void cancel_kernel_netlink_threads(void);
 #if defined _WITH_VRRP_ || defined _WITH_LVS_
 extern void kernel_netlink_read_interfaces(void);
 #endif

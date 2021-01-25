@@ -28,10 +28,10 @@
  * In order not to have to specify different pid files for each instance of
  * keepalived, if keepalived is running in a network namespace it will also create
  * its own mount namespace, and will slave bind mount a unique directory
- * (/var/run/keepalived/NAMESPACE) on /var/run/keepalived, so keepalived will
- * write its usual pid files (but to /var/run/keepalived rather than to /var/run),
+ * (/run/keepalived/NAMESPACE) on /run/keepalived, so keepalived will
+ * write its usual pid files (but to /run/keepalived rather than to /run),
  * and outside the mount namespace these will be visible at
- * /var/run/keepalived/NAMESPACE.
+ * /run/keepalived/NAMESPACE.
  *
  * If you are familiar with network namespaces, then you will know what you can do
  * with them. If not, then the following scenarios should give you an idea of what
@@ -163,6 +163,21 @@
 #include <stdio.h>
 #include <sys/mount.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+
+#ifdef LIBIPVS_USE_NL
+#ifdef _HAVE_LIBNL1_
+#include <linux/types.h>
+#endif
+#include <linux/netlink.h>	/* Required for netlink/headers.h prior to libnl v3.3.0 */
+#include <netlink/socket.h>
+#include <netlink/genl/genl.h>
+#ifdef _LIBNL_DYNAMIC_
+#include "libnl_link.h"
+#endif
+#endif
 
 #ifndef HAVE_SETNS
 //#include "linux/unistd.h"
@@ -193,10 +208,14 @@ setns(int fd, int nstype)
 #include "memory.h"
 #include "logger.h"
 #include "pidfile.h"
+#include "utils.h"
+#include "bitops.h"
+
 
 /* Local data */
-static const char *netns_dir = "/var/run/netns/";
+static const char *netns_dir = RUN_DIR "netns/";
 static char *mount_dirname;
+static bool run_mount_set;
 
 void
 free_dirname(void)
@@ -208,7 +227,9 @@ free_dirname(void)
 static void
 set_run_mount(const char *net_namespace)
 {
-	/* /var/run/keepalived/NAMESPACE */
+	bool error;
+
+	/* /run/keepalived/NAMESPACE */
 	mount_dirname = MALLOC(strlen(KEEPALIVED_PID_DIR) + 1 + strlen(net_namespace));
 	if (!mount_dirname) {
 		log_message(LOG_INFO, "Unable to allocate memory for pid file dirname");
@@ -218,7 +239,17 @@ set_run_mount(const char *net_namespace)
 	strcpy(mount_dirname, KEEPALIVED_PID_DIR);
 	strcat(mount_dirname, net_namespace);
 
-	if (mkdir(mount_dirname, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) && errno != EEXIST) {
+	/* We want the directory to have rwxr-xr-x permissions */
+	if (umask_val & (S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
+		umask(umask_val & ~(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+
+	error = mkdir(mount_dirname, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) && errno != EEXIST;
+
+	/* Restore our default umask */
+	if (umask_val & (S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
+		umask(umask_val);
+
+	if (error) {
 		log_message(LOG_INFO, "Unable to create directory %s", mount_dirname);
 		free_dirname();
 		return;
@@ -237,11 +268,16 @@ set_run_mount(const char *net_namespace)
 
 	if (mount(mount_dirname, pid_directory, NULL, MS_BIND, NULL))
 		log_message(LOG_INFO, "Mount failed, error (%d) '%s'", errno, strerror(errno));
+
+	run_mount_set = true;
 }
 
 static void
 unmount_run(void)
 {
+	if (!run_mount_set)
+		return;
+
 	if (umount(pid_directory))
 		log_message(LOG_INFO, "unmount of %s failed - errno %d", pid_directory, errno);
 	if (mount_dirname) {
@@ -279,7 +315,8 @@ set_namespaces(const char* net_namespace)
 
 	close(fd);
 
-	set_run_mount(net_namespace);
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		set_run_mount(net_namespace);
 
 	FREE_PTR(netns_path);
 	netns_path = NULL;
@@ -300,3 +337,138 @@ clear_namespaces(void)
 {
 	unmount_run();
 }
+
+/* get default namespace file descriptor to be able to place fd in a given
+ * namespace
+ */
+static int
+open_current_namespace(void)
+{
+	return open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
+}
+
+/* opens namespace for ipvs communication */
+static int open_ipvs_namespace(const char *ns_name)
+{
+	char netns_path[PATH_MAX];
+	const char *path;
+
+	if (ns_name[0]) {
+		if (snprintf(netns_path, sizeof(netns_path), "/var/run/netns/%s", ns_name) < 0)
+			return -1;
+		path = netns_path;
+	} else
+		path = "/proc/1/ns/net";
+
+	return open(path, O_RDONLY | O_CLOEXEC);
+}
+
+#ifdef _INCLUDE_UNUSED_CODE_
+/* opens a socket in the <nsfd> namespace with the parameters <domain>,
+ * <type> and <protocol> and returns the FD or -1 in case of error (check errno).
+ */
+int
+socket_netns(int nsfd, int domain, int type, int protocol)
+{
+	int sock;
+
+	if (default_namespace >= 0 && nsfd && setns(nsfd, CLONE_NEWNET) == -1)
+		return -1;
+
+	sock = socket(domain, type, protocol);
+
+	if (default_namespace >= 0 && nsfd && setns(default_namespace, CLONE_NEWNET) == -1) {
+		if (sock >= 0)
+			close(sock);
+		return -1;
+	}
+	return sock;
+}
+#endif
+
+static int
+set_netns_name(const char *netns_name)
+{
+	int cur_net_namespace = -1;
+	int new_net_namespace;
+	int ret;
+
+	if (!netns_name)
+		return -1;
+
+	new_net_namespace = open_ipvs_namespace(netns_name);
+	cur_net_namespace = open_current_namespace();
+
+	if (cur_net_namespace < 0 || new_net_namespace < 0) {
+		if (cur_net_namespace >= 0)
+			close(cur_net_namespace);
+		else if (new_net_namespace >= 0)
+			close(new_net_namespace);
+		log_message(LOG_INFO, "Failed to open namespace fds, errno %d (%m)", errno);
+		return -1;
+	}
+
+	ret = setns(new_net_namespace, CLONE_NEWNET);
+	close(new_net_namespace);
+
+	if (ret < 0) {
+		close(cur_net_namespace);
+		log_message(LOG_INFO, "Open socket - unable to set namespace, errno %d (%m)", errno);
+		return -1;
+	}
+
+	return cur_net_namespace;
+}
+
+static void
+restore_net_namespace(int cur_net_namespace)
+{
+	int ret;
+
+	ret = setns(cur_net_namespace, CLONE_NEWNET);
+	close(cur_net_namespace);
+
+	if (ret < 0) {
+		log_message(LOG_INFO, "Open socket - unable to restore default namespace, errno %d (%m)", errno);
+		return;
+	}
+}
+
+int
+socket_netns_name(const char *netns_name, int domain, int type, int protocol)
+{
+	int cur_net_namespace = -1;
+	int sock;
+
+	if (netns_name &&
+	    (cur_net_namespace = set_netns_name(netns_name)) < 0)
+		return -1;
+
+	sock = socket(domain, type, protocol);
+
+	if (cur_net_namespace >= 0)
+		restore_net_namespace(cur_net_namespace);
+
+	return sock;
+}
+
+#ifdef LIBIPVS_USE_NL
+/* netlink connect within ipvs namespace */
+int
+nl_ipvs_connect(const char *netns_name, struct nl_sock *sock)
+{
+	int cur_net_namespace = -1;
+	int ret;
+
+	if (netns_name &&
+	    (cur_net_namespace = set_netns_name(netns_name)) < 0)
+		return -1;
+
+	ret = genl_connect(sock);
+
+	if (cur_net_namespace >= 0)
+		restore_net_namespace(cur_net_namespace);
+
+	return ret < 0 ? -1 : 0;
+}
+#endif

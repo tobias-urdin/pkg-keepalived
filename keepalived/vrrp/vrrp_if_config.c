@@ -159,7 +159,7 @@ get_sysctl(const char* prefix, const char* iface, const char* parameter)
 static struct nlattr *
 nest_start(struct nlmsghdr *nlh, unsigned short type)
 {
-	struct nlattr *nest = NLMSG_TAIL(nlh);
+	struct nlattr *nest = PTR_CAST(struct nlattr, NLMSG_TAIL(nlh));
 
 	nest->nla_type = type;
 	nlh->nlmsg_len += sizeof(struct nlattr);
@@ -204,9 +204,9 @@ netlink_set_interface_flags(int ifindex, const sysctl_opts_t *sys_opts)
 	for (so = sys_opts; so->param; so++)
 		addattr32(&req.n, sizeof req, so->param, so->value);
 
-	nest_end(NLMSG_TAIL(&req.n), conf_start);
-	nest_end(NLMSG_TAIL(&req.n), inet_start);
-	nest_end(NLMSG_TAIL(&req.n), start);
+	nest_end(PTR_CAST(struct nlattr, NLMSG_TAIL(&req.n)), conf_start);
+	nest_end(PTR_CAST(struct nlattr, NLMSG_TAIL(&req.n)), inet_start);
+	nest_end(PTR_CAST(struct nlattr, NLMSG_TAIL(&req.n)), start);
 
 	if (netlink_talk(&nl_cmd, &req.n) < 0)
 		status = 1;
@@ -224,7 +224,7 @@ netlink_set_interface_parameters(const interface_t *ifp, interface_t *base_ifp)
 	/* If the underlying interface is a MACVLAN that has been moved into
 	 * a separate network namespace from the parent, we can't access the
 	 * parent. */
-	if (IS_VLAN(ifp) && ifp == base_ifp)
+	if (IS_MAC_IP_VLAN(ifp) && ifp == base_ifp)
 		return 0;
 
 	/* Set arp_ignore and arp_filter on base interface if needed */
@@ -323,7 +323,7 @@ set_interface_parameters_sysctl(const interface_t *ifp, interface_t *base_ifp)
 	/* If the underlying interface is a MACVLAN that has been moved into
 	 * a separate network namespace from the parent, we can't access the
 	 * parent. */
-	if (IS_VLAN(ifp) && ifp == base_ifp)
+	if (IS_MAC_IP_VLAN(ifp) && ifp == base_ifp)
 		return;
 
 	if (base_ifp->reset_arp_config)
@@ -416,8 +416,7 @@ reset_promote_secondaries(interface_t *ifp)
 static void
 clear_rp_filter(void)
 {
-	list ifs;
-	element e;
+	list_head_t *ifq;
 	interface_t *ifp;
 	unsigned rp_filter;
 #ifdef _HAVE_IPV4_DEVCONF_
@@ -449,8 +448,8 @@ clear_rp_filter(void)
 	rpfilter_sysctl[0].value = all_rp_filter;
 #endif
 	kernel_netlink_poll();		/* Update our view of interfaces first */
-	ifs = get_if_list();
-	LIST_FOREACH(ifs, ifp, e) {
+	ifq = get_interface_queue();
+	list_for_each_entry(ifp, ifq, e_list) {
 		if (!ifp->ifindex)
 			continue;
 #ifndef _HAVE_IPV4_DEVCONF_
@@ -479,8 +478,7 @@ clear_rp_filter(void)
 void
 restore_rp_filter(void)
 {
-	list ifs;
-	element e;
+	list_head_t *ifq;
 	interface_t *ifp;
 	unsigned rp_filter;
 #ifdef _HAVE_IPV4_DEVCONF_
@@ -507,8 +505,8 @@ restore_rp_filter(void)
 		default_rp_filter = UINT_MAX;
 	}
 
-	ifs = get_if_list();
-	LIST_FOREACH(ifs, ifp, e) {
+	ifq = get_interface_queue();
+	list_for_each_entry(ifp, ifq, e_list) {
 		if (ifp->rp_filter != UINT_MAX) {
 			rp_filter = get_sysctl("net/ipv4/conf", ifp->ifname, "rp_filter");
 			if (rp_filter == all_rp_filter) {

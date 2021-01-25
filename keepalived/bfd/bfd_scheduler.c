@@ -43,17 +43,11 @@
 #include "signals.h"
 #include "assert_debug.h"
 
-/* RFC5881 section 4 */
-#define	BFD_MIN_PORT	49152
-#define	BFD_MAX_PORT	65535
-
+/* Locals */
 static int bfd_send_packet(int, bfdpkt_t *, bool);
 static void bfd_sender_schedule(bfd_t *);
 
-static void bfd_state_down(bfd_t *, u_char diag);
-static void bfd_state_admindown(bfd_t *);
-static void bfd_state_up(bfd_t *);
-static void bfd_dump_timers(FILE *fp, bfd_t *);
+static void bfd_state_down(bfd_t *, uint8_t diag);
 
 /*
  * Session sender thread
@@ -62,18 +56,23 @@ static void bfd_dump_timers(FILE *fp, bfd_t *);
  * with Poll bit set
  */
 
-inline static long
+inline static unsigned long
 thread_time_to_wakeup(thread_ref_t thread)
 {
 	struct timeval tmp_time;
 
-	timersub(&thread->sands, &time_now, &tmp_time);
+	/* Make sure thread->sands is not in the past */
+	if (thread->sands.tv_sec < time_now.tv_sec ||
+	    (thread->sands.tv_sec == time_now.tv_sec &&
+	     thread->sands.tv_usec <= time_now.tv_usec))
+		return 1;
 
+	timersub(&thread->sands, &time_now, &tmp_time);
 	return timer_long(tmp_time);
 }
 
 /* Sends one BFD control packet and reschedules itself if needed */
-static int
+static void
 bfd_sender_thread(thread_ref_t thread)
 {
 	bfd_t *bfd;
@@ -90,7 +89,7 @@ bfd_sender_thread(thread_ref_t thread)
 	bfd_build_packet(&pkt, bfd, bfd_buffer, BFD_BUFFER_SIZE);
 	if (bfd_send_packet(bfd->fd_out, &pkt, !bfd->send_error) == -1) {
 		if (!bfd->send_error) {
-			log_message(LOG_ERR, "BFD_Instance(%s) Error sending packet", bfd->iname);
+			log_message(LOG_ERR, "(%s) Error sending packet", bfd->iname);
 			bfd->send_error = true;
 		}
 	} else
@@ -102,8 +101,6 @@ bfd_sender_thread(thread_ref_t thread)
 	/* Schedule next run if not called as an event thread */
 	if (thread->type != THREAD_EVENT)
 		bfd_sender_schedule(bfd);
-
-	return 0;
 }
 
 /* Schedules bfd_sender_thread to run in local_tx_intv minus applied jitter */
@@ -179,7 +176,7 @@ bfd_sender_suspend(bfd_t * bfd)
 {
 	assert(bfd);
 	assert(bfd->thread_out);
-	assert(bfd->sands_out == -1);
+	assert(bfd->sands_out == TIMER_NEVER);
 
 	bfd->sands_out = thread_time_to_wakeup(bfd->thread_out);
 	bfd_sender_cancel(bfd);
@@ -191,12 +188,12 @@ bfd_sender_resume(bfd_t *bfd)
 {
 	assert(bfd);
 	assert(!bfd->thread_out);
-	assert(bfd->sands_out != -1);
+	assert(bfd->sands_out != TIMER_NEVER);
 
 	if (!bfd->passive || bfd->local_state == BFD_STATE_UP)
 		bfd->thread_out =
 		    thread_add_timer(master, bfd_sender_thread, bfd, bfd->sands_out);
-	bfd->sands_out = -1;
+	bfd->sands_out = TIMER_NEVER;
 }
 
 /* Returns 1 if bfd_sender_thread is suspended, 0 otherwise */
@@ -205,16 +202,16 @@ bfd_sender_suspended(bfd_t *bfd)
 {
 	assert(bfd);
 
-	return bfd->sands_out != -1;
+	return bfd->sands_out != TIMER_NEVER;
 }
 
 static void
 bfd_sender_discard(bfd_t *bfd)
 {
 	assert(bfd);
-	assert(bfd->sands_out != -1);
+	assert(bfd->sands_out != TIMER_NEVER);
 
-	bfd->sands_out = -1;
+	bfd->sands_out = TIMER_NEVER;
 }
 
 /*
@@ -225,7 +222,7 @@ bfd_sender_discard(bfd_t *bfd)
  */
 
 /* Marks session as down because of Control Detection Time Expiration */
-static int
+static void
 bfd_expire_thread(thread_ref_t thread)
 {
 	bfd_t *bfd;
@@ -251,7 +248,7 @@ bfd_expire_thread(thread_ref_t thread)
 
 	if (bfd->local_state == BFD_STATE_UP ||
 	    __test_bit(LOG_EXTRA_DETAIL_BIT, &debug))
-		log_message(LOG_WARNING, "BFD_Instance(%s) Expired after"
+		log_message(LOG_WARNING, "(%s) Expired after"
 			    " %" PRIu32 " ms (%" PRIu32 " usec overdue)",
 			    bfd->iname, dead_time / 1000, overdue_time);
 
@@ -263,8 +260,6 @@ bfd_expire_thread(thread_ref_t thread)
 	 */
 	bfd->remote_discr = 0;
 	bfd_state_down(bfd, BFD_DIAG_EXPIRED);
-
-	return 0;
 }
 
 /* Schedules bfd_expire_thread to run in local_detect_time */
@@ -315,7 +310,7 @@ bfd_expire_suspend(bfd_t *bfd)
 {
 	assert(bfd);
 	assert(bfd->thread_exp);
-	assert(bfd->sands_exp == -1);
+	assert(bfd->sands_exp == TIMER_NEVER);
 
 	bfd->sands_exp = thread_time_to_wakeup(bfd->thread_exp);
 	bfd_expire_cancel(bfd);
@@ -327,11 +322,11 @@ bfd_expire_resume(bfd_t *bfd)
 {
 	assert(bfd);
 	assert(!bfd->thread_exp);
-	assert(bfd->sands_exp != -1);
+	assert(bfd->sands_exp != TIMER_NEVER);
 
 	bfd->thread_exp =
 	    thread_add_timer(master, bfd_expire_thread, bfd, bfd->sands_exp);
-	bfd->sands_exp = -1;
+	bfd->sands_exp = TIMER_NEVER;
 }
 
 /* Returns 1 if bfd_expire_thread is suspended, 0 otherwise */
@@ -340,16 +335,16 @@ bfd_expire_suspended(bfd_t *bfd)
 {
 	assert(bfd);
 
-	return bfd->sands_exp != -1;
+	return bfd->sands_exp != TIMER_NEVER;
 }
 
 static void
 bfd_expire_discard(bfd_t *bfd)
 {
 	assert(bfd);
-	assert(bfd->sands_exp != -1);
+	assert(bfd->sands_exp != TIMER_NEVER);
 
-	bfd->sands_exp = -1;
+	bfd->sands_exp = TIMER_NEVER;
 }
 
 /*
@@ -360,7 +355,7 @@ bfd_expire_discard(bfd_t *bfd)
  */
 
 /* Resets BFD session to initial state */
-static int
+static void
 bfd_reset_thread(thread_ref_t thread)
 {
 	bfd_t *bfd;
@@ -374,8 +369,6 @@ bfd_reset_thread(thread_ref_t thread)
 	bfd->thread_rst = NULL;
 
 	bfd_reset_state(bfd);
-
-	return 0;
 }
 
 /* Schedules bfd_reset_thread to run in local_detect_time */
@@ -416,7 +409,7 @@ bfd_reset_suspend(bfd_t *bfd)
 {
 	assert(bfd);
 	assert(bfd->thread_rst);
-	assert(bfd->sands_rst == -1);
+	assert(bfd->sands_rst == TIMER_NEVER);
 
 	bfd->sands_rst = thread_time_to_wakeup(bfd->thread_rst);
 	bfd_reset_cancel(bfd);
@@ -428,11 +421,11 @@ bfd_reset_resume(bfd_t *bfd)
 {
 	assert(bfd);
 	assert(!bfd->thread_rst);
-	assert(bfd->sands_rst != -1);
+	assert(bfd->sands_rst != TIMER_NEVER);
 
 	bfd->thread_rst =
 	    thread_add_timer(master, bfd_reset_thread, bfd, bfd->sands_rst);
-	bfd->sands_rst = -1;
+	bfd->sands_rst = TIMER_NEVER;
 }
 
 /* Returns 1 if bfd_reset_thread is suspended, 0 otherwise */
@@ -441,16 +434,16 @@ bfd_reset_suspended(bfd_t *bfd)
 {
 	assert(bfd);
 
-	return bfd->sands_rst != -1;
+	return bfd->sands_rst != TIMER_NEVER;
 }
 
 static void
 bfd_reset_discard(bfd_t *bfd)
 {
 	assert(bfd);
-	assert(bfd->sands_rst != -1);
+	assert(bfd->sands_rst != TIMER_NEVER);
 
-	bfd->sands_rst = -1;
+	bfd->sands_rst = TIMER_NEVER;
 }
 
 /*
@@ -480,7 +473,7 @@ bfd_state_fall(bfd_t *bfd, bool send_event)
 
 /* Runs when BFD session state goes Down */
 static void
-bfd_state_down(bfd_t *bfd, u_char diag)
+bfd_state_down(bfd_t *bfd, uint8_t diag)
 {
 	assert(bfd);
 	assert(BFD_VALID_DIAG(diag));
@@ -491,7 +484,7 @@ bfd_state_down(bfd_t *bfd, u_char diag)
 
 	if (bfd->local_state == BFD_STATE_UP ||
 	    __test_bit(LOG_EXTRA_DETAIL_BIT, &debug))
-		log_message(LOG_WARNING, "BFD_Instance(%s) Entering %s state"
+		log_message(LOG_WARNING, "(%s) Entering %s state"
 			    " (Local diagnostic - %s, Remote diagnostic - %s)",
 			    bfd->iname, BFD_STATE_STR(BFD_STATE_DOWN),
 			    BFD_DIAG_STR(diag),
@@ -520,7 +513,7 @@ bfd_state_admindown(bfd_t *bfd)
 	if (bfd_sender_scheduled(bfd))
 		bfd_sender_cancel(bfd);
 
-	log_message(LOG_WARNING, "BFD_Instance(%s) Entering %s state",
+	log_message(LOG_WARNING, "(%s) Entering %s state",
 		    bfd->iname, BFD_STATE_STR(bfd->local_state));
 
 	bfd_state_fall(bfd, false);
@@ -535,7 +528,7 @@ bfd_state_rise(bfd_t *bfd)
 
 	if (bfd->local_state == BFD_STATE_UP ||
 	    __test_bit(LOG_EXTRA_DETAIL_BIT, &debug))
-		log_message(LOG_INFO, "BFD_Instance(%s) Entering %s state",
+		log_message(LOG_INFO, "(%s) Entering %s state",
 			    bfd->iname, BFD_STATE_STR(bfd->local_state));
 
 	if (bfd_reset_scheduled(bfd))
@@ -581,25 +574,28 @@ bfd_state_init(bfd_t *bfd)
 static void
 bfd_dump_timers(FILE *fp, bfd_t *bfd)
 {
+	int indent;
+
 	assert(bfd);
 
-	conf_write(fp, "BFD_Instance(%s)"
-		    " --------------< Session parameters >-------------",
+	indent = 2 + strlen(bfd->iname);
+	conf_write(fp, "(%s)"
+		    " ---------------< Session parameters >--------------",
 		    bfd->iname);
-	conf_write(fp, "BFD_Instance(%s)"
-		    "        min_tx  min_rx  tx_intv  mult  detect_time",
-		    bfd->iname);
-	conf_write(fp, "BFD_Instance(%s)"
-		    " local %7u %7u %8u %5u %12" PRIu64,
-		    bfd->iname, (bfd->local_state == BFD_STATE_UP ? bfd->local_min_tx_intv : bfd->local_idle_tx_intv) / 1000,
-		    bfd->local_min_rx_intv / 1000,
-		    bfd->local_tx_intv / 1000, bfd->local_detect_mult,
-		    bfd->local_detect_time / 1000);
-	conf_write(fp, "BFD_Instance(%s)" " remote %6u %7u %8u %5u %12" PRIu64,
-		    bfd->iname, bfd->remote_min_tx_intv / 1000,
-		    bfd->remote_min_rx_intv / 1000,
-		    bfd->remote_tx_intv / 1000, bfd->remote_detect_mult,
-		    bfd->remote_detect_time / 1000);
+	conf_write(fp, "%*s"
+		    "          min_tx  min_rx  tx_intv  mult  detect_time",
+		    indent, "");
+	conf_write(fp, "%*s"
+		    " local  %8u %7u %8u %5u %12" PRIu64,
+		    indent, "", (bfd->local_state == BFD_STATE_UP ? bfd->local_min_tx_intv : bfd->local_idle_tx_intv),
+		    bfd->local_min_rx_intv,
+		    bfd->local_tx_intv, bfd->local_detect_mult,
+		    bfd->local_detect_time);
+	conf_write(fp, "%*s" " remote %8u %7u %8u %5u %12" PRIu64,
+		    indent, "", bfd->remote_min_tx_intv,
+		    bfd->remote_min_rx_intv,
+		    bfd->remote_tx_intv, bfd->remote_detect_mult,
+		    bfd->remote_detect_time);
 }
 
 /*
@@ -624,7 +620,7 @@ bfd_send_packet(int fd, bfdpkt_t *pkt, bool log_error)
 
 	ret =
 	    sendto(fd, pkt->buf, pkt->len, 0,
-		   (struct sockaddr *) &pkt->dst_addr, dstlen);
+		   PTR_CAST(struct sockaddr, &pkt->dst_addr), dstlen);
 	if (ret == -1 && log_error)
 		log_message(LOG_ERR, "sendto() error (%m)");
 
@@ -755,11 +751,13 @@ bfd_handle_packet(bfdpkt_t *pkt)
 		bfd_sender_reschedule(bfd);
 
 	/* Report detection time changes */
-	if (bfd->local_detect_time != old_local_detect_time)
-		log_message(LOG_INFO, "BFD_Instance(%s) Detection time"
-			    " is %" PRIu64 " ms (was %" PRIu64 " ms)", bfd->iname,
-			    bfd->local_detect_time / 1000,
-			    old_local_detect_time / 1000);
+	if (bfd->local_detect_time != old_local_detect_time) {
+		int len = strlen(bfd->iname) + 2;
+		log_message(LOG_INFO, "%*s Detection time"
+			    " is %" PRIu64 " us (was %" PRIu64 " us)", len, "",
+			    bfd->local_detect_time,
+			    old_local_detect_time);
+	}
 
 	/* BFD state machine */
 	if (bfd->remote_state == BFD_STATE_ADMINDOWN &&
@@ -814,9 +812,9 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 	unsigned int ttl = 0;
 	struct msghdr msg;
 	struct cmsghdr *cmsg = NULL;
-	char cbuf[CMSG_SPACE(sizeof (struct in6_pktinfo)) + CMSG_SPACE(sizeof(ttl))];
+	char cbuf[CMSG_SPACE(sizeof (struct in6_pktinfo)) + CMSG_SPACE(sizeof(ttl))] __attribute__((aligned(__alignof__(struct cmsghdr))));
 	struct iovec iov[1];
-	struct in6_pktinfo *pktinfo;
+	const struct in6_pktinfo *pktinfo;
 
 	assert(pkt);
 	assert(fd >= 0);
@@ -854,12 +852,12 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 		    (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT))
 			ttl = *CMSG_DATA(cmsg);
 		else if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
-			pktinfo = (struct in6_pktinfo *)CMSG_DATA(cmsg);
+			pktinfo = PTR_CAST_CONST(struct in6_pktinfo, CMSG_DATA(cmsg));
 			if (IN6_IS_ADDR_V4MAPPED(&pktinfo->ipi6_addr)) {
-				((struct sockaddr_in *)&pkt->dst_addr)->sin_addr.s_addr = pktinfo->ipi6_addr.s6_addr32[3];
+				PTR_CAST(struct sockaddr_in, &pkt->dst_addr)->sin_addr.s_addr = pktinfo->ipi6_addr.s6_addr32[3];
 				pkt->dst_addr.ss_family = AF_INET;
 			} else {
-				memcpy(&((struct sockaddr_in6 *)&pkt->dst_addr)->sin6_addr, &pktinfo->ipi6_addr, sizeof(pktinfo->ipi6_addr));
+				memcpy(&PTR_CAST(struct sockaddr_in6, &pkt->dst_addr)->sin6_addr, &pktinfo->ipi6_addr, sizeof(pktinfo->ipi6_addr));
 				pkt->dst_addr.ss_family = AF_INET6;
 			}
 		}
@@ -872,13 +870,13 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
 	if (!ttl)
 		log_message(LOG_WARNING, "recvmsg() returned no TTL control message");
 
-	pkt->hdr = (bfdhdr_t *) buf;
+	pkt->hdr = PTR_CAST(bfdhdr_t, buf);
 	pkt->len = len;
 	pkt->ttl = ttl;
 
 	/* Convert an IPv4-mapped IPv6 address to a real IPv4 address */
-	if (IN6_IS_ADDR_V4MAPPED(&((struct sockaddr_in6 *)&pkt->src_addr)->sin6_addr)) {
-		((struct sockaddr_in *)&pkt->src_addr)->sin_addr.s_addr = ((struct sockaddr_in6 *)&pkt->src_addr)->sin6_addr.s6_addr32[3];
+	if (IN6_IS_ADDR_V4MAPPED(&PTR_CAST(struct sockaddr_in6, &pkt->src_addr)->sin6_addr)) {
+		PTR_CAST(struct sockaddr_in, &pkt->src_addr)->sin_addr.s_addr = PTR_CAST(struct sockaddr_in6, &pkt->src_addr)->sin6_addr.s6_addr32[3];
 		pkt->src_addr.ss_family = AF_INET;
 	}
 
@@ -890,7 +888,7 @@ bfd_receive_packet(bfdpkt_t *pkt, int fd, char *buf, ssize_t bufsz)
  */
 
 /* Runs when data is available in listening socket */
-static int
+static void
 bfd_receiver_thread(thread_ref_t thread)
 {
 	bfd_data_t *data;
@@ -908,7 +906,7 @@ bfd_receiver_thread(thread_ref_t thread)
 	data->thread_in = NULL;
 
 	/* Ignore THREAD_READ_TIMEOUT */
-	if (thread->type == THREAD_READY_FD) {
+	if (thread->type == THREAD_READY_READ_FD) {
 		if (!bfd_receive_packet(&pkt, fd, bfd_buffer, BFD_BUFFER_SIZE))
 			bfd_handle_packet(&pkt);
 	}
@@ -916,8 +914,6 @@ bfd_receiver_thread(thread_ref_t thread)
 	data->thread_in =
 	    thread_add_read(thread->master, bfd_receiver_thread, data,
 			    fd, TIMER_NEVER, false);
-
-	return 0;
 }
 
 /*
@@ -989,8 +985,8 @@ read_local_port_range(uint32_t port_limits[2])
 	val[0] = strtol(buf, &endptr, 10);
 	if (val[0] <= 0 || val[0] == LONG_MAX || (*endptr != '\t' && *endptr != ' '))
 		return false;
-	val[1] = strtol(buf, &endptr, 10);
-	if (val[1] <= 0 || val[0] == LONG_MAX || *endptr != '\n')
+	val[1] = strtol(endptr + 1, &endptr, 10);
+	if (val[1] <= 0 || val[1] == LONG_MAX || *endptr != '\n')
 		return false;
 
 	port_limits[0] = val[0];
@@ -1007,13 +1003,14 @@ bfd_open_fd_out(bfd_t *bfd)
 	int ret;
 	uint32_t port_limits[2];
 	uint16_t orig_port, port;
+	socklen_t sockaddr_len;
 
 	assert(bfd);
 	assert(bfd->fd_out == -1);
 
 	bfd->fd_out = socket(bfd->nbr_addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
 	if (bfd->fd_out == -1) {
-		log_message(LOG_ERR, "BFD_Instance(%s) socket() error (%m)",
+		log_message(LOG_ERR, "(%s) socket() error (%m)",
 			    bfd->iname);
 		return 1;
 	}
@@ -1035,15 +1032,15 @@ bfd_open_fd_out(bfd_t *bfd)
 		}
 
 		orig_port = port = rand_intv(port_limits[0], port_limits[1]);
+		sockaddr_len = bfd->src_addr.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
 		do {
 			/* Try binding socket to the address until we find one available */
 			if (bfd->src_addr.ss_family == AF_INET)
-				((struct sockaddr_in *)&bfd->src_addr)->sin_port = htons(port);
+				PTR_CAST(struct sockaddr_in, &bfd->src_addr)->sin_port = htons(port);
 			else
-				((struct sockaddr_in6 *)&bfd->src_addr)->sin6_port = htons(port);
+				PTR_CAST(struct sockaddr_in6, &bfd->src_addr)->sin6_port = htons(port);
 
-			ret = bind(bfd->fd_out, (struct sockaddr *) &bfd->src_addr,
-				   sizeof (struct sockaddr));
+			ret = bind(bfd->fd_out, PTR_CAST(struct sockaddr, &bfd->src_addr), sockaddr_len);
 
 			if (ret == -1 && errno == EADDRINUSE) {
 				/* Port already in use, try next */
@@ -1059,7 +1056,7 @@ bfd_open_fd_out(bfd_t *bfd)
 
 		if (ret == -1) {
 			log_message(LOG_ERR,
-				    "BFD_Instance(%s) bind() error (%m)",
+				    "(%s) bind() error (%m)",
 				    bfd->iname);
 			return 1;
 		}
@@ -1077,7 +1074,7 @@ bfd_open_fd_out(bfd_t *bfd)
 		ret = setsockopt(bfd->fd_out, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl, sizeof (ttl));
 
 	if (ret == -1) {
-		log_message(LOG_ERR, "BFD_Instance(%s) setsockopt() "
+		log_message(LOG_ERR, "(%s) setsockopt() "
 			    " error (%m)", bfd->iname);
 		return 1;
 	}
@@ -1090,10 +1087,8 @@ static int
 bfd_open_fds(bfd_data_t *data)
 {
 	bfd_t *bfd;
-	element e;
 
 	assert(data);
-	assert(data->bfd);
 
 	/* Do not reopen input socket on reload */
 	if (bfd_data->fd_in == -1) {
@@ -1105,12 +1100,9 @@ bfd_open_fds(bfd_data_t *data)
 		}
 	}
 
-	for (e = LIST_HEAD(data->bfd); e; ELEMENT_NEXT(e)) {
-		bfd = ELEMENT_DATA(e);
-		assert(bfd);
-
+	list_for_each_entry(bfd, &data->bfd, e_list) {
 		if (bfd_open_fd_out(bfd)) {
-			log_message(LOG_ERR, "BFD_Instance(%s) Unable to"
+			log_message(LOG_ERR, "(%s) Unable to"
 				    " open output socket, disabling instance",
 				    bfd->iname);
 			bfd_state_admindown(bfd);
@@ -1125,7 +1117,6 @@ static void
 bfd_register_workers(bfd_data_t *data)
 {
 	bfd_t *bfd;
-	element e;
 
 	assert(data);
 	assert(!data->thread_in);
@@ -1135,9 +1126,7 @@ bfd_register_workers(bfd_data_t *data)
 					  data, data->fd_in, TIMER_NEVER, false);
 
 	/* Resume or schedule threads */
-	for (e = LIST_HEAD(data->bfd); e; ELEMENT_NEXT(e)) {
-		bfd = ELEMENT_DATA(e);
-
+	list_for_each_entry(bfd, &data->bfd, e_list) {
 		/* Do not start anything if instance is in AdminDown state.
 		   Discard saved state if any */
 		if (bfd_sender_suspended(bfd)) {
@@ -1176,7 +1165,6 @@ void
 bfd_dispatcher_release(bfd_data_t *data)
 {
 	bfd_t *bfd;
-	element e;
 
 	assert(data);
 
@@ -1198,9 +1186,7 @@ bfd_dispatcher_release(bfd_data_t *data)
 
 	/* Suspend threads for possible resuming after reconfiguration */
 	set_time_now();
-	for (e = LIST_HEAD(data->bfd); e; ELEMENT_NEXT(e)) {
-		bfd = ELEMENT_DATA(e);
-
+	list_for_each_entry(bfd, &data->bfd, e_list) {
 		if (bfd_sender_scheduled(bfd))
 			bfd_sender_suspend(bfd);
 
@@ -1220,7 +1206,7 @@ bfd_dispatcher_release(bfd_data_t *data)
 }
 
 /* Starts BFD dispatcher */
-int
+void
 bfd_dispatcher_init(thread_ref_t thread)
 {
 	bfd_data_t *data;
@@ -1232,8 +1218,6 @@ bfd_dispatcher_init(thread_ref_t thread)
 		exit(EXIT_FAILURE);
 
 	bfd_register_workers(data);
-
-	return 0;
 }
 
 

@@ -42,7 +42,7 @@
 #include "assert_debug.h"
 
 /* Initial state */
-const bfd_t bfd0 = {
+static const bfd_t bfd0 = {
 	.local_state = BFD_STATE_DOWN,
 	.remote_state = BFD_STATE_DOWN,
 	.local_discr = 0,	/* ! */
@@ -61,6 +61,7 @@ const bfd_t bfd0 = {
 	.local_detect_time = 0,
 	.remote_detect_time = 0,
 	.last_seen = (struct timeval) {0},
+	.e_list = {NULL, NULL},		/* Not used - just here to be plaisant to compiler */
 };
 
 void
@@ -88,7 +89,7 @@ void
 bfd_set_poll(bfd_t *bfd)
 {
 	if (__test_bit(LOG_DETAIL_BIT, &debug))
-		log_message(LOG_INFO, "BFD_Instance(%s) Starting poll sequence",
+		log_message(LOG_INFO, "(%s) Starting poll sequence",
 			    bfd->iname);
 	/*
 	 * RFC5880:
@@ -180,7 +181,7 @@ bfd_build_packet(bfdpkt_t *pkt, bfd_t *bfd, char *buf,
 	ssize_t len = sizeof (bfdhdr_t);
 
 	memset(buf, 0, bufsz);
-	pkt->hdr = (bfdhdr_t *) buf;
+	pkt->hdr = PTR_CAST(bfdhdr_t, buf);
 
 	/* If we are responding to a poll, but also wanted
 	 * to send a poll, we can send the parameters now */

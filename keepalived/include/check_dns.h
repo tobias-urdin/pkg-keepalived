@@ -30,7 +30,7 @@
 
 #define DNS_DEFAULT_RETRY    3
 #define DNS_DEFAULT_TYPE  DNS_TYPE_SOA
-#define DNS_DEFAULT_NAME    "."
+#define DNS_DEFAULT_NAME    ""
 #define DNS_BUFFER_SIZE    768
 
 #define DNS_QR(flags) ((flags >> 15) & 0x0001)
@@ -86,7 +86,7 @@ typedef struct _dns_header {
 typedef struct _dns_check {
 	uint16_t type;
 	const char *name;
-	uint8_t sbuf[DNS_BUFFER_SIZE];
+	uint8_t sbuf[DNS_BUFFER_SIZE] __attribute__((aligned(__alignof__(dns_header_t))));
 	size_t slen;
 } dns_check_t;
 

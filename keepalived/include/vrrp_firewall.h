@@ -30,7 +30,6 @@
 
 /* local includes */
 #include "vrrp.h"
-#include "list.h"
 
 #ifdef _WITH_IPTABLES_
 #include "vrrp_iptables.h"
@@ -39,9 +38,15 @@
 #include "vrrp_nftables.h"
 #endif
 
+/* The following is defined in linux/icmpv6.h, but both it and
+ * netinet/icmp6.h define struct icmp6_filter
+ */
+#define ICMPV6_MLD2_REPORT 143
+
+
 /* prototypes */
 extern void firewall_handle_accept_mode(vrrp_t *, int, bool);
-extern void firewall_remove_rule_to_iplist(list);
+extern void firewall_remove_rule_to_iplist(list_head_t *);
 #ifdef _HAVE_VRRP_VMAC_
 extern void firewall_add_vmac(const vrrp_t *);
 extern void firewall_remove_vmac(const vrrp_t *);

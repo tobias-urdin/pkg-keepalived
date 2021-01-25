@@ -26,9 +26,6 @@
 #include <openssl/err.h>
 #include <stdbool.h>
 
-/* keepalived includes */
-#include "utils.h"
-
 /* genhash includes */
 #include "include/ssl.h"
 #include "include/main.h"
@@ -113,7 +110,7 @@ ssl_connection_done(thread_ref_t thread)
 	thread_del_write(thread);
 }
 
-static int
+static void
 ssl_connect_complete_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -123,13 +120,14 @@ ssl_connect_complete_thread(thread_ref_t thread)
 	if (thread->type == THREAD_READ_TIMEOUT ||
 	    thread->type == THREAD_WRITE_TIMEOUT) {
 		exit_code = 1;
-		return epilog(thread);
+		epilog(thread);
+		return;
 	}
 
 	ret = SSL_connect(sock_obj->ssl);
 	if (ret > 0) {
 		ssl_connection_done(thread);
-		return 0;
+		return;
 	}
 
 	error = SSL_get_error(sock_obj->ssl, ret);
@@ -141,13 +139,13 @@ ssl_connect_complete_thread(thread_ref_t thread)
 		thread_add_write(thread->master, ssl_connect_complete_thread, sock_obj,
 				sock_obj->fd, req->timeout, true);
 	} else {
-		DBG("  SSL_connect return code = %d on fd:%d\n", ret, thread->u.fd);
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "  SSL_connect return code = %d on fd:%d\n", ret, thread->u.f.fd);
+#endif
 		ssl_printerr(error);
 		sock_obj->status = connect_error;
 		thread_add_terminate_event(thread->master);
 	}
-
-	return 0;
 }
 
 bool
@@ -201,7 +199,9 @@ ssl_connect(thread_ref_t thread)
 		return 1;
 	}
 
-	DBG("  SSL_connect return code = %d on fd:%d\n", ret, thread->u.fd);
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, "  SSL_connect return code = %d on fd:%d\n", ret, thread->u.f.fd);
+#endif
 	ssl_printerr(error);
 
 	return (ret > 0);
@@ -228,7 +228,7 @@ ssl_send_request(SSL *ssl, const char *str_request, int request_len)
 }
 
 /* Asynchronous SSL stream reader */
-int
+void
 ssl_read_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -238,7 +238,8 @@ ssl_read_thread(thread_ref_t thread)
 	/* Handle read timeout */
 	if (thread->type == THREAD_READ_TIMEOUT) {
 		exit_code = 1;
-		return epilog(thread);
+		epilog(thread);
+		return;
 	}
 
 	/*
@@ -272,26 +273,28 @@ ssl_read_thread(thread_ref_t thread)
 			thread_add_read(thread->master, ssl_read_thread, sock_obj,
 					sock_obj->fd, req->timeout, true);
 
-			return 0;
+			return;
 		} else if (r == -1 && error == SSL_ERROR_WANT_WRITE) {
 			thread_add_write(thread->master, ssl_read_thread, sock_obj,
 					sock_obj->fd, req->timeout, true);
 
-			return 0;
+			return;
 		}
-		DBG(" [l:%d,fd:%d]\n", r, sock_obj->fd);
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, " [l:%d,fd:%d]\n", r, sock_obj->fd);
+#endif
 
 		if (error != SSL_ERROR_NONE) {
 			/* All the SSL stream has been parsed */
 			/* Handle response stream */
-			return finalize(thread);
+			finalize(thread);
+			return;
 		} else if (r <= 0)
-			return 0;
+			return;
 
 		/* Handle the response stream */
 		http_process_stream(sock_obj, r);
 	} while (true);
 
 	/* Unreachable */
-	return 0;
 }
