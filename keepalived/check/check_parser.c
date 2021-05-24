@@ -137,6 +137,7 @@ vsg_handler(const vector_t *strvec)
 							, vsg->gname);
 		free_vsg(vsg);
 	} else if (vsg->have_ipv4 && vsg->have_ipv6 && vsg->fwmark_no_family) {
+/* The error here is fwmark_no_family && all rs tunnelled - but we only know that later */
 		report_config_error(CONFIG_GENERAL_ERROR, "virtual server group %s cannot have IPv4, IPv6"
 							  " and fwmark without family - removing"
 							, vsg->gname);
@@ -224,6 +225,8 @@ ip_family_handler(const vector_t *strvec)
 		skip_block(false);
 		return;
 #endif
+
+		/* coverity[unreachable] */
 		af = AF_INET6;
 	}
 	else {
@@ -320,11 +323,8 @@ lbflags_handler(const vector_t *strvec)
 	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
 	const char *str = strvec_slot(strvec, 0);
 
-	if (false) {}
-#ifdef IP_VS_SVC_F_ONEPACKET
-	else if (!strcmp(str, "ops"))
+	if (!strcmp(str, "ops"))
 		vs->flags |= IP_VS_SVC_F_ONEPACKET;
-#endif
 #ifdef IP_VS_SVC_F_SCHED1		/* From Linux 3.11 */
 	else if (!strcmp(str, "flag-1"))
 		vs->flags |= IP_VS_SVC_F_SCHED1;
@@ -492,7 +492,6 @@ pto_handler(const vector_t *strvec)
 
 	vs->persistence_timeout = (uint32_t)timeout;
 }
-#ifdef _HAVE_PE_NAME_
 static void
 pengine_handler(const vector_t *strvec)
 {
@@ -505,7 +504,6 @@ pengine_handler(const vector_t *strvec)
 	strncpy(vs->pe_name, str, size - 1);
 	vs->pe_name[size - 1] = '\0';
 }
-#endif
 static void
 pgr_handler(const vector_t *strvec)
 {
@@ -967,9 +965,7 @@ init_check_keywords(bool active)
 	install_keyword("lvs_sched", &lbalgo_handler);
 
 	install_keyword("hashed", &lbflags_handler);
-#ifdef IP_VS_SVC_F_ONEPACKET
 	install_keyword("ops", &lbflags_handler);
-#endif
 #ifdef IP_VS_SVC_F_SCHED1
 	install_keyword("flag-1", &lbflags_handler);
 	install_keyword("flag-2", &lbflags_handler);
@@ -981,9 +977,7 @@ init_check_keywords(bool active)
 #endif
 	install_keyword("lb_kind", &vs_forwarding_handler);
 	install_keyword("lvs_method", &vs_forwarding_handler);
-#ifdef _HAVE_PE_NAME_
 	install_keyword("persistence_engine", &pengine_handler);
-#endif
 	install_keyword("persistence_timeout", &pto_handler);
 	install_keyword("persistence_granularity", &pgr_handler);
 	install_keyword("protocol", &proto_handler);

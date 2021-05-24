@@ -675,7 +675,7 @@ process_track_file(tracked_file_t *tfile, bool init)
 			new_status = strtoll(buf, NULL, 0);
 #endif
 			if (errno || new_status < (int64_t)INT32_MIN || new_status > (int64_t)INT32_MAX + 1) {
-				log_message(LOG_INFO, "Invalid number %ld read from %s - ignoring",  new_status, tfile->file_path);
+				log_message(LOG_INFO, "Invalid number %" PRId64 " read from %s - ignoring",  new_status, tfile->file_path);
 				return;
 			}
 		}
@@ -843,15 +843,7 @@ init_track_files(list_head_t *track_files)
 		}
 
 		if (inotify_fd == -1) {
-#ifdef HAVE_INOTIFY_INIT1
 			inotify_fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-#else
-			inotify_fd = inotify_init();
-			if (inotify_fd != -1) {
-				fcntl(inotify_fd, F_SETFD, FD_CLOEXEC);
-				fcntl(inotify_fd, F_SETFL, O_NONBLOCK);
-			}
-#endif
 
 			if (inotify_fd == -1) {
 				log_message(LOG_INFO, "Unable to monitor track files");

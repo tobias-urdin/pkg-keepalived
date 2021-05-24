@@ -37,9 +37,7 @@
 #include <sys/timerfd.h>
 #include <sys/epoll.h>
 #include <unistd.h>
-#ifdef HAVE_SIGNALFD
 #include <sys/signalfd.h>
-#endif
 #include <sys/utsname.h>
 #include <linux/version.h>
 #include <sched.h>
@@ -53,9 +51,6 @@
 #include "bitops.h"
 #include "git-commit.h"
 #include "timer.h"
-#if !HAVE_EPOLL_CREATE1 || !defined TFD_NONBLOCK
-#include "old_socket.h"
-#endif
 #include "assert_debug.h"
 #include "warnings.h"
 #include "utils.h"
@@ -550,8 +545,8 @@ report_child_status(int status, pid_t pid, char const *prog_name)
 			log_message(LOG_INFO, "  %s", "Please report a bug at https://github.com/acassen/keepalived/issues");
 			log_message(LOG_INFO, "  %s", "and include this log from when keepalived started, a description");
 			log_message(LOG_INFO, "  %s", "of what happened before the crash, your configuration file and the details below.");
-			log_message(LOG_INFO, "  %s", "Also provide the output of keepalived -v, what Linux distro and version");
-			log_message(LOG_INFO, "  %s", "you are running on, and whether keepalived is being run in a container or VM.");
+			log_message(LOG_INFO, "  %s", "Also provide the output of keepalived -v, and whether keepalived is being");
+			log_message(LOG_INFO, "  %s", "run in a container or VM.");
 			log_message(LOG_INFO, "  %s", "A failure to provide all this information may mean the crash cannot be investigated.");
 			log_message(LOG_INFO, "  %s", "If you are able to provide a stack backtrace with gdb that would really help.");
 			log_message(LOG_INFO, "  Source version %s %s%s", PACKAGE_VERSION,
@@ -742,21 +737,12 @@ thread_make_master(void)
 
 	PMALLOC(new);
 
-#if HAVE_EPOLL_CREATE1
 	new->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-#else
-	new->epoll_fd = epoll_create(1);
-#endif
 	if (new->epoll_fd < 0) {
 		log_message(LOG_INFO, "scheduler: Error creating EPOLL instance (%m)");
 		FREE(new);
 		return NULL;
 	}
-
-#if !HAVE_EPOLL_CREATE1
-	if (set_sock_flags(new->epoll_fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on epoll_fd - %d (%m)", errno);
-#endif
 
 	new->read = RB_ROOT_CACHED;
 	new->write = RB_ROOT_CACHED;
@@ -773,26 +759,12 @@ thread_make_master(void)
 
 
 	/* Register timerfd thread */
-	new->timer_fd = timerfd_create(CLOCK_MONOTONIC,
-#ifdef TFD_NONBLOCK				/* Since Linux 2.6.27 */
-							TFD_NONBLOCK | TFD_CLOEXEC
-#else
-							0
-#endif
-										  );
+	new->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 	if (new->timer_fd < 0) {
 		log_message(LOG_ERR, "scheduler: Cant create timerfd (%m)");
 		FREE(new);
 		return NULL;
 	}
-
-#ifndef TFD_NONBLOCK
-	if (set_sock_flags(new->timer_fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on timer_fd - %d (%m)", errno);
-
-	if (set_sock_flags(new->timer_fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on timer_fd - %d (%m)", errno);
-#endif
 
 	new->signal_fd = signal_handler_init();
 
@@ -1774,7 +1746,9 @@ static list_head_t *
 thread_fetch_next_queue(thread_master_t *m)
 {
 	int last_epoll_errno = 0;
+#ifndef _ONE_PROCESS_DEBUG_
 	unsigned last_epoll_errno_count = 0;
+#endif
 	int ret;
 	int i;
 	timeval_t earliest_timer;
@@ -1835,12 +1809,17 @@ thread_fetch_next_queue(thread_master_t *m)
 				/* Log the error first time only */
 				log_message(LOG_INFO, "scheduler: epoll_wait error: %d (%m)", errno);
 
+#ifndef _ONE_PROCESS_DEBUG_
 				last_epoll_errno_count = 1;
-			} else if (++last_epoll_errno_count == 5 && shutdown_function) {
+#endif
+			}
+#ifndef _ONE_PROCESS_DEBUG_
+			else if (++last_epoll_errno_count == 5 && shutdown_function) {
 				/* We aren't goint to be able to recover, so exit and let our parent restart us */
 				log_message(LOG_INFO, "scheduler: epoll_wait has returned errno %d for 5 successive calls - terminating", last_epoll_errno);
 				shutdown_function(KEEPALIVED_EXIT_PROGRAM_ERROR);
 			}
+#endif
 
 			/* Make sure we don't sit it a tight loop */
 			if (last_epoll_errno == EBADF || last_epoll_errno == EFAULT || last_epoll_errno == EINVAL)

@@ -43,10 +43,6 @@
 #include "parser.h"
 #include "utils.h"
 #include "html.h"
-#if !HAVE_DECL_SOCK_CLOEXEC
-#include "old_socket.h"
-#include "string.h"
-#endif
 #include "layer4.h"
 #include "ipwrapper.h"
 #include "smtp.h"
@@ -251,7 +247,7 @@ dump_url(FILE *fp, const url_t *url)
 
 #ifdef _WITH_REGEX_CHECK_
 	if (url->regex) {
-		char options_buf[512];
+		char options_buf[512] = "";
 		char *op;
 
 		conf_write(fp, "     Regex = \"%s\"", url->regex->pattern);
@@ -263,18 +259,17 @@ dump_url(FILE *fp, const url_t *url)
 			else
 				conf_write(fp, "     Regex min offset = %zu", url->regex_min_offset);
 		}
+
 		if (url->regex->pcre2_options) {
 			op = options_buf;
 			for (i = 0; regex_options[i].option; i++) {
-				if (url->regex->pcre2_options & regex_options[i].option_bit) {
+				if (regex_options[i].option_bit) {
 					*op++ = ' ';
 					strcpy(op, regex_options[i].option);
 					op += strlen(op);
 				}
 			}
 		}
-		else
-			options_buf[0] = '\0';
 		conf_write(fp, "     Regex options:%s", options_buf);
 		conf_write(fp, "     Regex ref count = %u", url->regex->refcnt);
 #ifndef PCRE2_DONT_USE_JIT
@@ -1720,16 +1715,6 @@ http_connect_thread(thread_ref_t thread)
 
 		return;
 	}
-
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (set_sock_flags(fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on http_connect socket - %s (%d)", strerror(errno), errno);
-#endif
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on http_connect socket - %s (%d)", strerror(errno), errno);
-#endif
 
 	status = tcp_bind_connect(fd, co);
 

@@ -26,10 +26,8 @@
 #include <sys/utsname.h>
 #include <sys/resource.h>
 #include <stdbool.h>
-#ifdef HAVE_SIGNALFD
 #include <sys/signalfd.h>
 #include <sys/epoll.h>
-#endif
 #include <errno.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -45,6 +43,9 @@
 #include "global_data.h"
 #include "daemon.h"
 #include "config.h"
+#ifndef _ONE_PROCESS_DEBUG_
+#include "config_notify.h"
+#endif
 #include "git-commit.h"
 #include "utils.h"
 #include "signals.h"
@@ -62,7 +63,7 @@
 #include "vrrp_daemon.h"
 #include "vrrp_parser.h"
 #include "vrrp_if.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
 #ifdef _WITH_JSON_
@@ -77,9 +78,7 @@
 #include "bfd_parser.h"
 #endif
 #include "global_parser.h"
-#if HAVE_DECL_CLONE_NEWNET
 #include "namespaces.h"
-#endif
 #include "scheduler.h"
 #include "keepalived_netlink.h"
 #include "git-commit.h"
@@ -114,7 +113,7 @@
 #ifndef _ONE_PROCESS_DEBUG_
 #include "reload_monitor.h"
 #endif
-#ifdef _USE_SYSTEMD_
+#ifdef _USE_SYSTEMD_NOTIFY_
 #include "systemd.h"
 #endif
 #include "warnings.h"
@@ -128,6 +127,7 @@ struct child_term {
 	const char * const short_name;
 };
 
+#ifndef _ONE_PROCESS_DEBUG_
 static const struct child_term children_term[] = {
 #ifdef _WITH_VRRP_
 	{ &vrrp_child, PROG_VRRP, "vrrp" },
@@ -135,16 +135,16 @@ static const struct child_term children_term[] = {
 #ifdef _WITH_LVS_
 	{ &checkers_child, PROG_CHECK, "checker" },
 #endif
-#ifdef _WITH_BFD
+#ifdef _WITH_BFD_
 	{ &bfd_child, PROG_BFD, "bfd" },
 #endif
 };
 #define NUM_CHILD_TERM	(sizeof children_term / sizeof children_term[0])
+#endif
 
 /* global var */
 const char *version_string = VERSION_STRING;		/* keepalived version */
 const char *conf_file = KEEPALIVED_CONFIG_FILE;		/* Configuration file */
-int log_facility = LOG_DAEMON;				/* Optional logging facilities */
 bool reload;						/* Set during a reload */
 const char *main_pidfile;				/* overrule default pidfile */
 static bool free_main_pidfile;
@@ -176,9 +176,7 @@ unsigned os_minor;
 unsigned os_release;
 char *hostname;						/* Initial part of hostname */
 
-#if HAVE_DECL_CLONE_NEWNET
 static char *override_namespace;			/* If namespace specified on command line */
-#endif
 
 unsigned child_wait_time = CHILD_WAIT_SECS;		/* Time to wait for children to exit */
 
@@ -191,11 +189,19 @@ static struct {
 };
 #define	LOG_FACILITY_MAX	((sizeof(LOG_FACILITY) / sizeof(LOG_FACILITY[0])) - 1)
 
+static struct {
+	const char *name;
+	int facility;
+} facility_names[] = {
+	{ "daemon", LOG_DAEMON },
+	{ "user", LOG_USER }
+};
+
 /* umask settings */
 bool umask_cmdline;
 
 /* Reload control */
-static unsigned num_reloading;
+unsigned num_reloading;
 
 /* Control producing core dumps */
 static bool set_core_dump_pattern = false;
@@ -203,7 +209,9 @@ static bool create_core_dump = false;
 static const char *core_dump_pattern = "core";
 static char *orig_core_dump_pattern = NULL;
 
+#ifndef _ONE_PROCESS_DEBUG_
 static const char *dump_file = KA_TMP_DIR "/keepalived_parent.data";
+#endif
 
 /* debug flags */
 #if defined _TIMER_CHECK_ || \
@@ -296,9 +304,7 @@ void
 free_parent_mallocs_startup(bool am_child)
 {
 	if (am_child) {
-#if HAVE_DECL_CLONE_NEWNET
 		free_dirname();
-#endif
 #ifdef _MEM_CHECK_LOG_
 		free(no_const_char_p(syslog_ident));	/* malloc'd in make_syslog_ident */
 #else
@@ -340,10 +346,8 @@ make_syslog_ident(const char* name)
 	size_t ident_len = strlen(name) + 1;
 	char *ident;
 
-#if HAVE_DECL_CLONE_NEWNET
 	if (global_data->network_namespace)
 		ident_len += strlen(global_data->network_namespace) + 1;
-#endif
 	if (global_data->instance_name)
 		ident_len += strlen(global_data->instance_name) + 1;
 
@@ -359,12 +363,10 @@ make_syslog_ident(const char* name)
 		return NULL;
 
 	strcpy(ident, name);
-#if HAVE_DECL_CLONE_NEWNET
 	if (global_data->network_namespace) {
 		strcat(ident, "_");
 		strcat(ident, global_data->network_namespace);
 	}
-#endif
 	if (global_data->instance_name) {
 		strcat(ident, "_");
 		strcat(ident, global_data->instance_name);
@@ -444,6 +446,7 @@ global_init_keywords(void)
 	return keywords;
 }
 
+#ifndef _ONE_PROCESS_DEBUG_
 static void
 create_reload_file(void)
 {
@@ -466,27 +469,30 @@ create_reload_file(void)
 		umask(umask_val);
 }
 
-static inline  void
+static inline void
 remove_reload_file(void)
 {
 	if (global_data->reload_file && !__test_bit(CONFIG_TEST_BIT, &debug))
 		unlink(global_data->reload_file);
 }
+#endif
 
 static void
 read_config_file(bool write_config_copy)
 {
-#ifdef _ONE_PROCESS_DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
+	if (write_config_copy)
+		create_reload_file();
+#else
 	write_config_copy = false;
 #endif
 
-	if (write_config_copy)
-		create_reload_file();
-
 	init_data(conf_file, global_init_keywords, write_config_copy);
 
+#ifndef _ONE_PROCESS_DEBUG_
 	if (write_config_copy)
 		remove_reload_file();
+#endif
 }
 
 /* Daemon stop sequence */
@@ -734,10 +740,8 @@ static bool reload_config(void)
 
 	log_message(LOG_INFO, "Reloading ...");
 
-#ifndef _ONE_PROCESS_DEBUG_
 	if (global_data->reload_time_file)
 		stop_reload_monitor();
-#endif
 
 	/* Clear any config errors from previous loads */
 	clear_config_status();
@@ -753,7 +757,6 @@ static bool reload_config(void)
 
 	init_global_data(global_data, old_global_data, false);
 
-#if HAVE_DECL_CLONE_NEWNET
 	if (override_namespace) {
 		FREE_CONST_PTR(global_data->network_namespace);
 		global_data->network_namespace = STRDUP(override_namespace);
@@ -764,7 +767,6 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change network namespace at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
-#endif
 
 	if (!!old_global_data->instance_name != !!global_data->instance_name ||
 	    (global_data->instance_name && strcmp(old_global_data->instance_name, global_data->instance_name))) {
@@ -773,11 +775,20 @@ static bool reload_config(void)
 	}
 
 #ifdef _WITH_NFTABLES_
+#ifdef _WITH_VRRP_
 	if (!!old_global_data->vrrp_nf_table_name != !!global_data->vrrp_nf_table_name ||
 	    (global_data->vrrp_nf_table_name && strcmp(old_global_data->vrrp_nf_table_name, global_data->vrrp_nf_table_name))) {
 		log_message(LOG_INFO, "Cannot change nftables table name at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
+#endif
+#ifdef _WITH_LVS_
+	if (!!old_global_data->ipvs_nf_table_name != !!global_data->ipvs_nf_table_name ||
+	    (global_data->ipvs_nf_table_name && strcmp(old_global_data->ipvs_nf_table_name, global_data->ipvs_nf_table_name))) {
+		log_message(LOG_INFO, "Cannot change IPVS nftables table name at a reload - please restart %s", PACKAGE);
+		unsupported_change = true;
+	}
+#endif
 #endif
 
 	if (!!old_global_data->config_directory != !!global_data->config_directory ||
@@ -807,10 +818,8 @@ static bool reload_config(void)
 		free_global_data (old_global_data);
 	}
 
-#ifndef _ONE_PROCESS_DEBUG_
 	if (global_data->reload_time_file)
 		start_reload_monitor();
-#endif
 
 	return !unsupported_change;
 }
@@ -874,29 +883,13 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 		thread_add_event(master, print_parent_data, NULL, 0);
 }
 
-#ifndef _ONE_PROCESS_DEBUG_
-static void
-child_reloaded(__attribute__((unused)) void *one, __attribute__((unused)) int sig_num)
-{
-	if (num_reloading) {
-		num_reloading--;
-
-		if (!num_reloading) {
-			truncate_config_copy();
-#ifdef _USE_SYSTEMD_
-			systemd_notify_running();
-#endif
-		}
-	}
-}
-
 static void
 do_reload(void)
 {
 	if (!reload_config())
 		return;
 
-#ifdef _USE_SYSTEMD_
+#ifdef _USE_SYSTEMD_NOTIFY_
 	systemd_notify_reloading();
 #endif
 
@@ -953,13 +946,13 @@ start_validate_reload_conf_child(void)
 	int len;
 	char exe_buf[128];
 
-	/* Inherits the original parameters and adds new parameters "--config-test and --config-fd" */
-	sav_argv = get_cmd_line_options(&argc);
-	argv = MALLOC((argc + 3) * sizeof(char *));
-
 	exe_buf[sizeof(exe_buf) - 1] = '\0';
 	ret = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf));
-	if (ret == sizeof(exe_buf))
+	if (ret == -1) {
+		/* How can this happen? What can we do? */
+		log_message(LOG_INFO, "readlink(\"/proc/self/exe\" failed - errno %d - config-test aborted", errno);
+		return;
+	} else if (ret == sizeof(exe_buf))
 		strcpy(exe_buf, "/proc/self/exe");
 	else {
 		exe_buf[ret] = '\0';
@@ -969,6 +962,11 @@ start_validate_reload_conf_child(void)
 		if (len > 10 && !strcmp(exe_buf + len - 10, " (deleted)"))
 			exe_buf[len - 10] = '\0';
 	}
+
+	/* Inherits the original parameters and adds new parameters "--config-test and --config-fd" */
+	sav_argv = get_cmd_line_options(&argc);
+	argv = MALLOC((argc + 3) * sizeof(char *));
+
 	argv[0] = exe_buf;
 
 	/* copy old parameters */
@@ -989,7 +987,8 @@ start_validate_reload_conf_child(void)
 		argv[argc++] = config_fd_str;
 
 		/* Allow fd to be inherited by exec'd process */
-		fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) & ~FD_CLOEXEC);
+		if (fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) & ~FD_CLOEXEC) == -1)
+			log_message(LOG_INFO, "fcntl() on config-test fd failed - errno %d", errno);
 	}
 
 	argv[argc] = NULL;
@@ -1010,9 +1009,10 @@ start_validate_reload_conf_child(void)
 				  NULL, 5 * TIMER_HZ, &script);
 
 	if (ret)
-		log_message(LOG_INFO, "Could not run config_test");
+		log_message(LOG_INFO, "Could not run config-test");
 
 	/* Restore CLOEXEC on config_copy fd */
+	/* coverity[check_return] - what are we going to do if this fails? */
 	fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
 
 	FREE(argv);
@@ -1050,6 +1050,7 @@ thread_dump_signal(__attribute__((unused)) void *v, __attribute__((unused)) int 
 }
 #endif
 
+#ifndef _ONE_PROCESS_DEBUG_
 /* Terminate handler */
 static void
 sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
@@ -1059,45 +1060,28 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	struct timeval start_time, now;
 	size_t i;
 	int wstatus;
-#ifdef HAVE_SIGNALFD
 	int timeout = child_wait_time * 1000;
 	int signal_fd = master->signal_fd;
 	struct signalfd_siginfo siginfo;
 	sigset_t sigmask;
 	struct epoll_event ev = { .events = EPOLLIN, .data.fd = master->signal_fd };
 	int efd;
-#else
-	sigset_t old_set, child_wait;
-	struct timespec timeout = {
-		.tv_sec = child_wait_time,
-		.tv_nsec = 0
-	};
-#endif
 
 	log_message(LOG_INFO, "Stopping");
 
-#ifdef _USE_SYSTEMD_
+#ifdef _USE_SYSTEMD_NOTIFY_
 	systemd_notify_stopping();
 #endif
 
-#ifndef _ONE_PROCESSS_DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 	if (global_data->reload_time_file)
 		stop_reload_monitor();
 #endif
 
-#ifdef HAVE_SIGNALFD
 	/* We only want to receive SIGCHLD now */
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGCHLD);
 	signalfd(signal_fd, &sigmask, 0);
-#else
-	sigmask_func(0, NULL, &old_set);
-	if (!sigismember(&old_set, SIGCHLD)) {
-		sigemptyset(&child_wait);
-		sigaddset(&child_wait, SIGCHLD);
-		sigmask_func(SIG_BLOCK, &child_wait, NULL);
-	}
-#endif
 
 	/* Signal our children to terminate */
 	for (i = 0; i < NUM_CHILD_TERM; i++) {
@@ -1112,14 +1096,11 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 		}
 	}
 
-#ifdef HAVE_SIGNALFD
 	efd = epoll_create(1);
 	epoll_ctl(efd, EPOLL_CTL_ADD, signal_fd, &ev);
-#endif
 
 	gettimeofday(&start_time, NULL);
 	while (wait_count) {
-#ifdef HAVE_SIGNALFD
 		ret = epoll_wait(efd, &ev, 1, timeout);
 		if (ret == 0)
 			break;
@@ -1173,45 +1154,15 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 				break;
 			}
 		}
-#else
-		ret = sigtimedwait(&child_wait, NULL, &timeout);
-		if (ret == -1) {
-			if (check_EINTR(errno))
-				continue;
-			if (check_EAGAIN(errno))
-				break;
-		}
-
-		for (i = 0; i < NUM_CHILD_TERM && wait_count; i++) {
-			if (*children_term[i].pid_p > 0 && *children_term[i].pid_p == waitpid(*children_term[i].pid_p, &wstatus, WNOHANG)) {
-				report_child_status(wstatus, *children_term[i].pid_p, children_term[i].name);
-				*children_term[i].pid_p = 0;
-				wait_count--;
-			}
-		}
-#endif
 
 		if (wait_count) {
 			gettimeofday(&now, NULL);
-#ifdef HAVE_SIGNALFD
 			timeout = (child_wait_time - (now.tv_sec - start_time.tv_sec)) * 1000 + (start_time.tv_usec - now.tv_usec) / 1000;
 			if (timeout < 0)
 				break;
-#else
-			timeout.tv_sec = child_wait_time - (now.tv_sec - start_time.tv_sec);
-			timeout.tv_nsec = (start_time.tv_usec - now.tv_usec) * 1000;
-			if (timeout.tv_nsec < 0) {
-				timeout.tv_nsec += 1000000000L;
-				timeout.tv_sec--;
-			}
-			if (timeout.tv_sec < 0)
-				break;
-#endif
 		}
 	}
-#ifdef HAVE_SIGNALFD
 	close(efd);
-#endif
 
 	/* A child may not have terminated, so force its termination */
 	for (i = 0; i < NUM_CHILD_TERM; i++) {
@@ -1224,11 +1175,6 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	if (!global_data->shutdown_script) {
 		/* register the terminate thread */
 		thread_add_terminate_event(master);
-
-#ifndef HAVE_SIGNALFD
-		if (!sigismember(&old_set, SIGCHLD))
-			sigmask_func(SIG_UNBLOCK, &child_wait, NULL);
-#endif
 	} else {
 		/* If we have a shutdown script, run it now */
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
@@ -1249,7 +1195,6 @@ signal_init(void)
 	signal_set(SIGUSR1, propagate_signal, NULL);
 	signal_set(SIGUSR2, propagate_signal, NULL);
 	signal_set(SIGSTATS_CLEAR, propagate_signal, NULL);
-	signal_set(SIGPWR, child_reloaded, NULL);
 #ifdef _WITH_JSON_
 	signal_set(SIGJSON, propagate_signal, NULL);
 #endif
@@ -1269,7 +1214,6 @@ signals_ignore(void) {
 	signal_ignore(SIGUSR1);
 	signal_ignore(SIGUSR2);
 	signal_ignore(SIGSTATS_CLEAR);
-	signal_ignore(SIGPWR);
 #ifdef _WITH_JSON_
 	signal_ignore(SIGJSON);
 #endif
@@ -1430,7 +1374,7 @@ initialise_debug_options(void)
 #ifdef _CHECKSUM_DEBUG_
 	do_checksum_debug = !!(checksum_debug & mask);
 #endif
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #ifdef _TRACK_PROCESS_DEBUG_
 	do_track_process_debug_detail = !!(track_process_debug_detail & mask);
 	do_track_process_debug = !!(track_process_debug & mask) | do_track_process_debug_detail;
@@ -1794,9 +1738,7 @@ usage(const char *prog)
 	fprintf(stderr, "  -x, --snmp                   Enable SNMP subsystem\n");
 	fprintf(stderr, "  -A, --snmp-agent-socket=FILE Use the specified socket for master agent\n");
 #endif
-#if HAVE_DECL_CLONE_NEWNET
 	fprintf(stderr, "  -s, --namespace=NAME         Run in network namespace NAME (overrides config)\n");
-#endif
 	fprintf(stderr, "  -m, --core-dump              Produce core dump if terminate abnormally\n");
 	fprintf(stderr, "  -M, --core-dump-pattern=PATN Also set /proc/sys/kernel/core_pattern to PATN (default 'core')\n");
 #ifdef _MEM_CHECK_
@@ -1907,6 +1849,7 @@ parse_cmdline(int argc, char **argv)
 	bool bad_option = false;
 	unsigned facility;
 	mode_t new_umask_val;
+	unsigned i;
 
 	struct option long_options[] = {
 		{"use-file",		required_argument,	NULL, 'f'},
@@ -1961,9 +1904,7 @@ parse_cmdline(int argc, char **argv)
 #ifdef _MEM_CHECK_LOG_
 		{"mem-check-log",	no_argument,		NULL, 'L'},
 #endif
-#if HAVE_DECL_CLONE_NEWNET
 		{"namespace",		required_argument,	NULL, 's'},
-#endif
 		{"config-id",		required_argument,	NULL, 'i'},
 		{"signum",		required_argument,	NULL,  4 },
 		{"config-test",		optional_argument,	NULL, 't'},
@@ -1985,7 +1926,7 @@ parse_cmdline(int argc, char **argv)
 	 * is set to a known invalid value */
 	curind = optind;
 	/* Used short options: ABCDGILMPRSVXabcdefghilmnprstuvx */
-	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndu:DRS:f:p:i:emM::g::Gt::"
+	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndu:DRS:f:p:i:es:mM::g::Gt::"
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 					    "PC"
 #endif
@@ -2003,9 +1944,6 @@ parse_cmdline(int argc, char **argv)
 #endif
 #ifdef _MEM_CHECK_LOG_
 					    "L"
-#endif
-#if HAVE_DECL_CLONE_NEWNET
-					    "s:"
 #endif
 				, long_options, &longindex)) != -1) {
 
@@ -2073,11 +2011,22 @@ parse_cmdline(int argc, char **argv)
 			break;
 #endif
 		case 'S':
-			if (!read_unsigned(optarg, &facility, 0, LOG_FACILITY_MAX, false))
-				fprintf(stderr, "Invalid log facility '%s'\n", optarg);
-			else {
+			if (read_unsigned(optarg, &facility, 0, LOG_FACILITY_MAX, false) ||
+			    (!strncmp(optarg, "local", 5) &&
+			     read_unsigned(&optarg[5], &facility, 0, LOG_FACILITY_MAX, false))) {
 				log_facility = LOG_FACILITY[facility].facility;
 				reopen_log = true;
+			} else {
+				for (i = 0; i < sizeof(facility_names) / sizeof(facility_names[0]); i++) {
+					if (!strcmp(optarg, facility_names[i].name)) {
+						log_facility = facility_names[i].facility;
+						reopen_log = true;
+						break;
+					}
+				}
+
+				if (!reopen_log)
+					fprintf(stderr, "Invalid log facility '%s'\n", optarg);
 			}
 			break;
 		case 'g':
@@ -2102,6 +2051,7 @@ parse_cmdline(int argc, char **argv)
 			reopen_log = true;
 			break;
 		case 'u':
+			/* coverity[var_deref_model] */
 			new_umask_val = set_umask(optarg);
 			if (umask_cmdline)
 				umask_val = new_umask_val;
@@ -2179,11 +2129,9 @@ parse_cmdline(int argc, char **argv)
 			__set_bit(MEM_CHECK_LOG_BIT, &debug);
 			break;
 #endif
-#if HAVE_DECL_CLONE_NEWNET
 		case 's':
 			override_namespace = optarg;
 			break;
-#endif
 		case 'e':
 			include_check_set(NULL);
 			break;
@@ -2192,6 +2140,7 @@ parse_cmdline(int argc, char **argv)
 			config_id = STRDUP(optarg);
 			break;
 		case 4:			/* --signum */
+			/* coverity[var_deref_model] */
 			signum = get_signum(optarg);
 			if (signum == -1) {
 				fprintf(stderr, "Unknown sigfunc %s\n", optarg);
@@ -2306,7 +2255,9 @@ register_parent_thread_addresses(void)
 	register_signal_handler_address("sigend", sigend);
 #endif
 	register_signal_handler_address("thread_child_handler", thread_child_handler);
+#ifdef THREAD_DUMP
 	register_signal_handler_address("thread_dump_signal", thread_dump_signal);
+#endif
 
 	register_thread_address("start_keepalived", start_keepalived);
 	register_thread_address("startup_script_completed", startup_script_completed);
@@ -2357,8 +2308,10 @@ keepalived_main(int argc, char **argv)
 	/* Save command line options in case need to log them later */
 	save_cmd_line_options(argc, argv);
 
-#ifdef _USE_SYSTEMD_
+#ifdef _USE_SYSTEMD_NOTIFY_
+#ifndef _ONE_PROCESS_DEBUG_
 	check_parent_systemd();
+#endif
 #endif
 
 	/* We are the parent process */
@@ -2381,7 +2334,7 @@ keepalived_main(int argc, char **argv)
 	umask(umask_val);
 
 	/* Open log with default settings so we can log initially */
-	openlog(PACKAGE_NAME, LOG_PID, log_facility);
+	open_syslog(PACKAGE_NAME);
 
 #ifdef _MEM_CHECK_
 	mem_log_init(PACKAGE_NAME, "Parent process");
@@ -2422,7 +2375,7 @@ keepalived_main(int argc, char **argv)
 	if (parse_cmdline(argc, argv)) {
 		closelog();
 		if (!__test_bit(NO_SYSLOG_BIT, &debug))
-			openlog(PACKAGE_NAME, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0) , log_facility);
+			open_syslog(PACKAGE_NAME);
 	}
 
 	if (__test_bit(LOG_CONSOLE_BIT, &debug))
@@ -2484,7 +2437,7 @@ keepalived_main(int argc, char **argv)
 
 	init_global_data(global_data, NULL, false);
 
-#ifdef _WITH_NFTABLES_
+#if defined _WITH_VRRP_ && defined  _WITH_NFTABLES_
 	if (global_data->vrrp_nf_table_name)
 		set_nf_ifname_type();
 #endif
@@ -2493,7 +2446,6 @@ keepalived_main(int argc, char **argv)
 	if (global_data->process_name)
 		set_process_name(global_data->process_name);
 
-#if HAVE_DECL_CLONE_NEWNET
 	if (override_namespace) {
 		if (global_data->network_namespace) {
 			log_message(LOG_INFO, "Overriding config net_namespace '%s' with command line namespace '%s'", global_data->network_namespace, override_namespace);
@@ -2501,18 +2453,15 @@ keepalived_main(int argc, char **argv)
 		}
 		global_data->network_namespace = STRDUP(override_namespace);
 	}
-#endif
 
 	if (!__test_bit(CONFIG_TEST_BIT, &debug) &&
 	    (global_data->instance_name
-#if HAVE_DECL_CLONE_NEWNET
 	     || global_data->network_namespace
-#endif
 					      )) {
 		if ((syslog_ident = make_syslog_ident(PACKAGE_NAME))) {
 			log_message(LOG_INFO, "Changing syslog ident to %s", syslog_ident);
 			closelog();
-			openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0), log_facility);
+			open_syslog(syslog_ident);
 		}
 		else
 			log_message(LOG_INFO, "Unable to change syslog ident");
@@ -2522,11 +2471,7 @@ keepalived_main(int argc, char **argv)
 #ifdef ENABLE_LOG_TO_FILE
 		open_log_file(log_file_name,
 				NULL,
-#if HAVE_DECL_CLONE_NEWNET
 				global_data->network_namespace,
-#else
-				NULL,
-#endif
 				global_data->instance_name);
 #endif
 	}
@@ -2542,19 +2487,17 @@ keepalived_main(int argc, char **argv)
 
 		/* If we want to monitor processes, we have to do it before calling
 		 * setns() */
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 		open_track_processes();
 #endif
 	}
 
-#if HAVE_DECL_CLONE_NEWNET
 	if (global_data->network_namespace) {
 		if (global_data->network_namespace && !set_namespaces(global_data->network_namespace)) {
 			log_message(LOG_ERR, "Unable to set network namespace %s - exiting", global_data->network_namespace);
 			goto end;
 		}
 	}
-#endif
 
 	if (!__test_bit(CONFIG_TEST_BIT, &debug)) {
 		if (global_data->instance_name) {
@@ -2608,8 +2551,10 @@ keepalived_main(int argc, char **argv)
 #endif
 		}
 
+#ifndef _ONE_PROCESS_DEBUG_
 		/* We have set the namespaces, so we can do this now */
 		remove_reload_file();
+#endif
 
 		/* Check if keepalived is already running */
 		if (keepalived_running(daemon_mode)) {
@@ -2669,6 +2614,12 @@ keepalived_main(int argc, char **argv)
 	/* Signal handling initialization  */
 	signal_init();
 
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Open eventfd for children notifying parent that they have read the configuration file */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		open_config_read_fd();
+#endif
+
 	/* If we have a startup script, run it first */
 	if (global_data->startup_script) {
 		thread_add_event(master, run_startup_script, NULL, 0);
@@ -2715,10 +2666,8 @@ end:
 #endif
 	}
 
-#if HAVE_DECL_CLONE_NEWNET
 	if (global_data && global_data->network_namespace)
 		clear_namespaces();
-#endif
 
 	if (use_pid_dir)
 		remove_pid_dir();

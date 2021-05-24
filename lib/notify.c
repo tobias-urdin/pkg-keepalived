@@ -336,16 +336,6 @@ script_killall(thread_master_t *m, int signo, bool requeue)
 {
 	thread_t *thread;
 	pid_t p_pgid, c_pgid;
-#ifndef HAVE_SIGNALFD
-	sigset_t old_set, child_wait;
-
-	sigmask_func(0, NULL, &old_set);
-	if (!sigismember(&old_set, SIGCHLD)) {
-		sigemptyset(&child_wait);
-		sigaddset(&child_wait, SIGCHLD);
-		sigmask_func(SIG_BLOCK, &child_wait, NULL);
-	}
-#endif
 
 	p_pgid = getpgid(0);
 
@@ -362,11 +352,6 @@ script_killall(thread_master_t *m, int signo, bool requeue)
 	/* We want to timeout the killed children in 1 second */
 	if (requeue && signo != SIGKILL)
 		thread_children_reschedule(m, child_killed_thread, TIMER_HZ);
-
-#ifndef HAVE_SIGNALFD
-	if (!sigismember(&old_set, SIGCHLD))
-		sigmask_func(SIG_UNBLOCK, &child_wait, NULL);
-#endif
 }
 
 static bool
@@ -803,6 +788,9 @@ check_script_secure(notify_script_t *script,
 	/* Get the permissions for the file itself */
 	if (stat(real_file_path ? real_file_path : script->args[0], &file_buf)) {
 		log_message(LOG_INFO, "Unable to access script `%s` - disabling", script->args[0]);
+
+		FREE(real_file_path);
+
 		return SC_NOTFOUND;
 	}
 

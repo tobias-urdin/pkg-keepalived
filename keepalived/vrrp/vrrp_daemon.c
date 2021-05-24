@@ -45,10 +45,8 @@
 #include "vrrp_arp.h"
 #include "vrrp_ndisc.h"
 #include "keepalived_netlink.h"
-#ifdef _HAVE_FIB_ROUTING_
 #include "vrrp_iprule.h"
 #include "vrrp_iproute.h"
-#endif
 #include "vrrp_parser.h"
 #include "vrrp.h"
 #include "vrrp_print.h"
@@ -81,15 +79,19 @@
 #ifdef _WITH_FIREWALL_
 #include "vrrp_firewall.h"
 #endif
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
 #ifdef _WITH_LVS_
 #include "ipvswrapper.h"
 #endif
-#ifdef _USE_SYSTEMD_
+#ifdef _USE_SYSTEMD_NOTIFY_
 #include "systemd.h"
 #endif
+#ifndef _ONE_PROCESS_DEBUG_
+#include "config_notify.h"
+#endif
+
 
 /* Global variables */
 bool non_existent_interface_specified;
@@ -111,7 +113,7 @@ perf_t perf_run = PERF_NONE;
 /* local variables */
 static const char *vrrp_syslog_ident;
 static char sav_igmp_link_local_mcast_reports;
-#ifndef __ONE_PROCESS_DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static bool two_phase_terminate;
 static timeval_t vrrp_start_time;
 static unsigned vrrp_next_restart_delay;
@@ -189,12 +191,14 @@ set_vrrp_max_fds(void)
 	 * mem_check file
 	 * USR1/USR2/JSON data
 	 * smtp-alert file
+	 * memfd for config
+	 * eventfd for notifying load/reload complete
 	 *
 	 * plus:
 	 *
 	 * 20 spare (in case we have forgotten anything)
 	 */
-	set_max_file_limit(cnt * 2 + vrrp_data->num_smtp_alert + 21 + 20);
+	set_max_file_limit(cnt * 2 + vrrp_data->num_smtp_alert + 23 + 20);
 }
 
 #ifdef _WITH_LVS_
@@ -247,9 +251,10 @@ reset_disable_local_igmp(void)
 
 	if (sav_igmp_link_local_mcast_reports == '1') {
 		fd = open(igmp_link_local_mcast_reports, O_RDWR);
-		if (write(fd, &sav_igmp_link_local_mcast_reports, 1) != -1)
+		if (fd == -1 || write(fd, &sav_igmp_link_local_mcast_reports, 1) == -1)
 			log_message(LOG_INFO, "Unable to write %s - errno %d", igmp_link_local_mcast_reports, errno);
-		close(fd);
+		if (fd != -1)
+			close(fd);
 	}
 }
 
@@ -395,7 +400,7 @@ vrrp_terminate_phase1(bool schedule_next_thread)
 		run_perf("vrrp", global_data->network_namespace, global_data->instance_name);
 #endif
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	/* Stop monitoring process terminations */
 	end_process_monitor();
 #endif
@@ -435,10 +440,8 @@ vrrp_terminate_phase1(bool schedule_next_thread)
 		stop_track_files();
 
 	/* Clear static entries */
-#ifdef _HAVE_FIB_ROUTING_
 	netlink_rulelist(&vrrp_data->static_rules, IPRULE_DEL, false);
 	netlink_rtlist(&vrrp_data->static_routes, IPROUTE_DEL, false);
-#endif
 	netlink_iplist(&vrrp_data->static_addresses, IPADDRESS_DEL, false);
 
 #ifdef _NETLINK_TIMERS_
@@ -520,6 +523,12 @@ start_vrrp(data_t *prev_global_data)
 
 	init_data(conf_file, vrrp_init_keywords, false);
 
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
+#endif
+
 	/* Update process name if necessary */
 	if ((!reload && global_data->vrrp_process_name) ||
 	    (reload &&
@@ -575,10 +584,8 @@ start_vrrp(data_t *prev_global_data)
 		if (reload) {
 			kernel_netlink_set_recv_bufs();
 
-#ifdef _HAVE_FIB_ROUTING_
 			clear_diff_static_rules();
 			clear_diff_static_routes();
-#endif
 			clear_diff_static_addresses();
 			clear_diff_script();
 #ifdef _WITH_BFD_
@@ -588,12 +595,10 @@ start_vrrp(data_t *prev_global_data)
 		else {
 			/* Clear leftover static entries */
 			netlink_iplist(&vrrp_data->static_addresses, IPADDRESS_DEL, false);
-#ifdef _HAVE_FIB_ROUTING_
 			netlink_rtlist(&vrrp_data->static_routes, IPROUTE_DEL, false);
 			netlink_error_ignore = ENOENT;
 			netlink_rulelist(&vrrp_data->static_rules, IPRULE_DEL, true);
 			netlink_error_ignore = 0;
-#endif
 		}
 	}
 
@@ -610,8 +615,11 @@ start_vrrp(data_t *prev_global_data)
 	}
 
 	/* Complete VRRP initialization */
-	if (!vrrp_complete_init() ||
-	    (global_data->reload_check_config && get_config_status() != CONFIG_OK)) {
+	if (!vrrp_complete_init()
+#ifndef _ONE_PROCESS_DEBUG_
+	    || (global_data->reload_check_config && get_config_status() != CONFIG_OK)
+#endif
+	    			 ) {
 		stop_vrrp(KEEPALIVED_EXIT_CONFIG);
 		return;
 	}
@@ -663,10 +671,8 @@ start_vrrp(data_t *prev_global_data)
 
 	/* Set static entries */
 	netlink_iplist(&vrrp_data->static_addresses, IPADDRESS_ADD, false);
-#ifdef _HAVE_FIB_ROUTING_
 	netlink_rtlist(&vrrp_data->static_routes, IPROUTE_ADD, false);
 	netlink_rulelist(&vrrp_data->static_rules, IPRULE_ADD, false);
-#endif
 
 	/* Dump configuration */
 	if (__test_bit(DUMP_CONF_BIT, &debug))
@@ -674,10 +680,7 @@ start_vrrp(data_t *prev_global_data)
 
 	/* Set the process priority and non swappable if configured */
 	set_process_priorities(global_data->vrrp_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-			       global_data->vrrp_rlimit_rt,
-#endif
-			       global_data->vrrp_process_priority, global_data->vrrp_no_swap ? 4096 : 0);
+			       global_data->vrrp_rlimit_rt, global_data->vrrp_process_priority, global_data->vrrp_no_swap ? 4096 : 0);
 
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->vrrp_cpu_mask, "vrrp");
@@ -845,15 +848,14 @@ reload_vrrp_thread(__attribute__((unused)) thread_ref_t thread)
 	old_global_data = global_data;
 	global_data = NULL;
 	reset_interface_queue();
-#ifdef _HAVE_FIB_ROUTING_
 	reset_next_rule_priority();
-#endif
 
 	/* Reload the conf */
 	start_vrrp(old_global_data);
 
 #ifdef _WITH_LVS_
 	if (vrrp_ipvs_needed()) {
+		/* coverity[var_deref_op] */
 		want_syncd_master = (global_data->lvs_syncd.vrrp->state == VRRP_STATE_MAST);
 		if (ipvs_syncd_changed(&old_global_data->lvs_syncd, &global_data->lvs_syncd))
 			ipvs_syncd_cmd(IPVS_STOPDAEMON, NULL, want_syncd_master ? IPVS_MASTER : IPVS_BACKUP, true);
@@ -950,7 +952,7 @@ register_vrrp_thread_addresses(void)
 #endif
 	register_vrrp_fifo_addresses();
 	register_track_file_inotify_addresses();
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	register_process_monitor_addresses();
 #endif
 
@@ -1032,29 +1034,20 @@ start_vrrp_child(void)
 #endif
 
 	/* Opening local VRRP syslog channel */
-	if ((global_data->instance_name
-#if HAVE_DECL_CLONE_NEWNET
-			   || global_data->network_namespace
-#endif
-					       ) &&
+	if ((global_data->instance_name || global_data->network_namespace) &&
 	    (vrrp_syslog_ident = make_syslog_ident(PROG_VRRP)))
 			syslog_ident = vrrp_syslog_ident;
 	else
 		syslog_ident = PROG_VRRP;
 
 	if (!__test_bit(NO_SYSLOG_BIT, &debug))
-		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL1 : log_facility);
+		open_syslog(syslog_ident);
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		open_log_file(log_file_name,
 				"vrrp",
-#if HAVE_DECL_CLONE_NEWNET
 				global_data->network_namespace,
-#else
-				NULL,
-#endif
 				global_data->instance_name);
 #endif
 
@@ -1077,7 +1070,7 @@ start_vrrp_child(void)
 		exit(0);
 	}
 
-#ifdef _USE_SYSTEMD_
+#ifdef _USE_SYSTEMD_NOTIFY_
 	systemd_unset_notify();
 #endif
 

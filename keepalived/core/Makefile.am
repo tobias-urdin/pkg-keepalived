@@ -14,7 +14,8 @@ AM_LDFLAGS		= $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 noinst_LIBRARIES	= libcore.a
 
 libcore_a_SOURCES	= main.c daemon.c pidfile.c layer4.c smtp.c \
-			  global_data.c global_parser.c keepalived_netlink.c
+			  global_data.c global_parser.c keepalived_netlink.c \
+			  namespaces.c
 
 libcore_a_LIBADD =
 EXTRA_libcore_a_SOURCES =
@@ -24,9 +25,9 @@ if SNMP
   EXTRA_libcore_a_SOURCES += snmp.c
 endif
 
-if WITH_NAMESPACES
-  libcore_a_LIBADD	+= namespaces.o
-  EXTRA_libcore_a_SOURCES += namespaces.c
+if NFTABLES
+  libcore_a_LIBADD      += nftables.o
+  EXTRA_libcore_a_SOURCES += nftables.c
 endif
 
 if LIBNL_DYNAMIC
@@ -34,19 +35,19 @@ if LIBNL_DYNAMIC
   EXTRA_libcore_a_SOURCES += libnl_link.c
 endif
 
-if CN_PROC
+if TRACK_PROCESS
   libcore_a_LIBADD	+= track_process.o
   EXTRA_libcore_a_SOURCES += track_process.c
 endif
 
 if !ONE_PROCESS_DEBUG
-  libcore_a_LIBADD	+= reload_monitor.o
-  EXTRA_libcore_a_SOURCES += reload_monitor.c
-endif
-
-if WITH_SYSTEMD
+if WITH_SYSTEMD_NOTIFY
   libcore_a_LIBADD	+= systemd.o
   EXTRA_libcore_a_SOURCES += systemd.c
+endif
+
+  libcore_a_LIBADD	+= reload_monitor.o config_notify.o
+  EXTRA_libcore_a_SOURCES += reload_monitor.c config_notify.c
 endif
 
 MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@

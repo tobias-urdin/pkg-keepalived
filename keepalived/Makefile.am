@@ -17,7 +17,8 @@ edit = echo "  EDIT     $@"; \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
 	 -e 's|@RUN_DIR[@]|$(RUN_DIR)|g' \
 	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g' \
-	 -e 's|@SYSTEMD_SERVICE_TYPE[@]|$(SYSTEMD_SERVICE_TYPE)|g'
+	 -e 's|@SYSTEMD_SERVICE_TYPE[@]|$(SYSTEMD_SERVICE_TYPE)|g' \
+	 -e 's|@SYSTEMD_EXEC_START_OPTIONS[@]|$(SYSTEMD_EXEC_START_OPTIONS)|g'
 
 sbin_PROGRAMS		= keepalived
 keepalived_SOURCES	= main.c
@@ -46,11 +47,13 @@ if WITH_BFD
   BFD_LIB		= bfd/libbfd.a
 endif
 
-keepalived.service: Makefile
+if INIT_SYSTEMD
+keepalived.service: $(srcdir)/Makefile.am
 	@rm -f $@ $@.tmp
 	@$(edit) '$(srcdir)/$@.in' >$@
 
 keepalived.service: $(srcdir)/keepalived.service.in
+endif
 
 SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) $(TRACKER_SUBDIR) etc
 
@@ -61,9 +64,6 @@ keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcor
 MOSTLYCLEANFILES	= keepalived.service
 
 MAINTAINERCLEANFILES	= @MAINTAINERCLEANFILES@
-
-sysconfigdir		= $(sysconfdir)/sysconfig
-sysconfig_DATA		= etc/sysconfig/keepalived
 
 if INIT_SYSTEMD
 systemdsystemunit_DATA	= keepalived.service

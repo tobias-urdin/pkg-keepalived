@@ -4,7 +4,7 @@
 #
 # Copyright (C) 2020-2020 Alexandre Cassen, <acassen@gmail.com>
 
-DATE=`date --date=\"\`git log -n 1 -- $@.in | grep Date: | sed -e \"s/  */ /g\" | cut -d' ' -f 4,3,6\`\" +\"%Y-%m-%d\"`
+DATE=`date -u --date=@\"\`git log -n 1 --format=%ct -- $@.in 2>/dev/null || date --reference=$@.in +%s\`\" +\"%Y-%m-%d\"`
 
 edit = echo "  EDIT     $@"; \
 	sed \
@@ -14,7 +14,7 @@ edit = echo "  EDIT     $@"; \
 
 dist_man5_MANS  = keepalived.conf.5
 
-keepalived.conf.5: Makefile
+keepalived.conf.5: Makefile.am
 	@$(edit) '$(srcdir)/$@.in' >$@
 
 keepalived.conf.5: $(srcdir)/keepalived.conf.5.in

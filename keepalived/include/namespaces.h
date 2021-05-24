@@ -20,8 +20,8 @@
  * Copyright (C) 2016-2016 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _NAMESPACE_H_
-#define _NAMESPACE_H_
+#ifndef _NAMESPACE_H
+#define _NAMESPACE_H
 
 #include <stdbool.h>
 
@@ -38,6 +38,8 @@
 extern void free_dirname(void);
 extern bool set_namespaces(const char*);
 extern void clear_namespaces(void);
+extern int set_netns_name(const char *);
+extern void restore_net_namespace(int);
 extern int socket_netns_name(const char *, int, int, int);
 
 /* ipvs namespaces */

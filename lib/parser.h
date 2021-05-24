@@ -42,7 +42,8 @@
 /* Maximum time read_timer can read - in micro-seconds */
 #define TIMER_MAXIMUM (ULONG_MAX)
 
-/* Special value for parameters when we want to know they haven't been set */
+/* Special values for parameters when we want to know they haven't been set */
+#define	TIME_T_PARAMETER_UNSET	LONG_MAX
 #define	PARAMETER_UNSET		UINT_MAX
 
 /* Configuration test errors. These should be in decreasing order of severity */
@@ -142,7 +143,6 @@ extern bool read_timer(const vector_t *, size_t, unsigned long *, unsigned long,
 extern int check_true_false(const char *) __attribute__ ((pure));
 extern void skip_block(bool);
 extern void init_data(const char *, const vector_t * (*init_keywords) (void), bool);
-extern void truncate_config_copy(void);
 extern int get_config_fd(void);
 extern void set_config_fd(int);
 void include_check_set(const vector_t *);

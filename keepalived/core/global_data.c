@@ -182,20 +182,14 @@ alloc_global_data(void)
 	new->min_auto_priority_delay = 1000000;	/* 1 second */
 #ifdef _WITH_VRRP_
 	new->vrrp_notify_fifo.fd = -1;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	new->vrrp_rlimit_rt = RT_RLIMIT_DEFAULT;
-#endif
 	new->vrrp_rx_bufs_multiples = 3;
 #endif
 #ifdef _WITH_LVS_
 	new->lvs_notify_fifo.fd = -1;
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	new->checker_rlimit_rt = RT_RLIMIT_DEFAULT;
-#endif
 #ifdef _WITH_BFD_
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	new->bfd_rlimit_rt = RT_RLIMIT_DEFAULT;
-#endif
 #endif
 #endif
 
@@ -245,7 +239,6 @@ init_global_data(data_t * data, data_t *prev_global_data, bool copy_unchangeable
 		prev_global_data->local_name = NULL;
 
 		if (copy_unchangeable_config) {
-#if HAVE_DECL_CLONE_NEWNET
 			FREE_CONST_PTR(data->network_namespace);
 			data->network_namespace = prev_global_data->network_namespace;
 			prev_global_data->network_namespace = NULL;
@@ -253,7 +246,6 @@ init_global_data(data_t * data, data_t *prev_global_data, bool copy_unchangeable
 			FREE_CONST_PTR(data->network_namespace_ipvs);
 			data->network_namespace_ipvs = prev_global_data->network_namespace_ipvs;
 			prev_global_data->network_namespace_ipvs = NULL;
-#endif
 
 			FREE_CONST_PTR(data->instance_name);
 			data->instance_name = prev_global_data->instance_name;
@@ -261,6 +253,7 @@ init_global_data(data_t * data, data_t *prev_global_data, bool copy_unchangeable
 		}
 	}
 
+#ifndef _ONE_PROCESS_DEBUG_
 	if (data->reload_file == DEFAULT_RELOAD_FILE) {
 		if (data->instance_name)
 			data->reload_file = make_pidfile_name(KEEPALIVED_PID_DIR KEEPALIVED_PID_FILE, data->instance_name, RELOAD_EXTENSION);
@@ -269,6 +262,7 @@ init_global_data(data_t * data, data_t *prev_global_data, bool copy_unchangeable
 		else
 			data->reload_file = STRDUP(RUN_DIR KEEPALIVED_PID_FILE RELOAD_EXTENSION);
 	}
+#endif
 
 	if (!data->local_name &&
 	    (!data->router_id ||
@@ -352,10 +346,8 @@ free_global_data(data_t * data)
 		return;
 
 	free_email_list(&data->email);
-#if HAVE_DECL_CLONE_NEWNET
 	FREE_CONST_PTR(data->network_namespace);
 	FREE_CONST_PTR(data->network_namespace_ipvs);
-#endif
 	FREE_CONST_PTR(data->instance_name);
 	FREE_CONST_PTR(data->process_name);
 #ifdef _WITH_VRRP_
@@ -397,10 +389,8 @@ free_global_data(data_t * data)
 	FREE_CONST_PTR(data->vrrp_ipset_address);
 	FREE_CONST_PTR(data->vrrp_ipset_address6);
 	FREE_CONST_PTR(data->vrrp_ipset_address_iface6);
-#ifdef HAVE_IPSET_ATTR_IFACE
 	FREE_CONST_PTR(data->vrrp_ipset_igmp);
 	FREE_CONST_PTR(data->vrrp_ipset_mld);
-#endif
 #endif
 #endif
 #ifdef _WITH_NFTABLES_
@@ -410,6 +400,9 @@ free_global_data(data_t * data)
 #ifdef _WITH_LVS_
 	FREE_CONST_PTR(data->lvs_notify_fifo.name);
 	free_notify_script(&data->lvs_notify_fifo.script);
+#ifdef _WITH_NFTABLES_
+	FREE_CONST_PTR(data->ipvs_nf_table_name);
+#endif
 #endif
 #ifdef _WITH_DBUS_
 	FREE_CONST_PTR(data->dbus_service_name);
@@ -441,10 +434,8 @@ dump_global_data(FILE *fp, data_t * data)
 
 	conf_write(fp, "------< Global definitions >------");
 
-#if HAVE_DECL_CLONE_NEWNET
 	conf_write(fp, " Network namespace = %s", data->network_namespace ? data->network_namespace : "(default)");
 	conf_write(fp, " Network namespace ipvs = %s", data->network_namespace_ipvs ? data->network_namespace_ipvs[0] ? data->network_namespace_ipvs : "(default)" : "(main namespace)");
-#endif
 	if (data->instance_name)
 		conf_write(fp, " Instance name = %s", data->instance_name);
 	if (data->process_name)
@@ -635,25 +626,33 @@ dump_global_data(FILE *fp, data_t * data)
 				conf_write(fp," ipset IPv6 address set = %s", data->vrrp_ipset_address6);
 			if (data->vrrp_ipset_address_iface6)
 				conf_write(fp," ipset IPv6 address,iface set = %s", data->vrrp_ipset_address_iface6);
-#ifdef HAVE_IPSET_ATTR_IFACE
 			if (data->vrrp_ipset_igmp)
 				conf_write(fp," ipset IGMP set = %s", data->vrrp_ipset_igmp);
 			if (data->vrrp_ipset_mld)
 				conf_write(fp," ipset MLD set = %s", data->vrrp_ipset_mld);
-#endif
 		}
 #endif
 	}
 #endif
 #ifdef _WITH_NFTABLES_
+#ifdef _WITH_VRRP_
 	if (data->vrrp_nf_table_name) {
 		conf_write(fp," nftables table name = %s", data->vrrp_nf_table_name);
 		conf_write(fp," nftables base chain priority = %d", data->vrrp_nf_chain_priority);
-		conf_write(fp," nftables with%s counters", data->vrrp_nf_counters ? "" : "out");
 		conf_write(fp," nftables %sforce use ifindex for link local IPv6", data->vrrp_nf_ifindex ? "" : "don't ");
-		conf_write(fp," libnftnl version %u.%u.%u", LIBNFTNL_VERSION >> 16,
-			       (LIBNFTNL_VERSION >> 8) & 0xff, LIBNFTNL_VERSION & 0xff);
 	}
+#endif
+
+#ifdef _WITH_LVS_
+	if (data->ipvs_nf_table_name) {
+		conf_write(fp," ipvs nftables table name = %s", data->ipvs_nf_table_name);
+		conf_write(fp," ipvs nftables base chain priority = %d", data->ipvs_nf_chain_priority);
+		conf_write(fp," ipvs nftables start fwmark = %u", data->ipvs_nftables_start_fwmark);
+	}
+#endif
+	conf_write(fp," nftables with%s counters", data->nf_counters ? "" : "out");
+	conf_write(fp," libnftnl version %u.%u.%u", LIBNFTNL_VERSION >> 16,
+		       (LIBNFTNL_VERSION >> 8) & 0xff, LIBNFTNL_VERSION & 0xff);
 #endif
 
 	conf_write(fp, " VRRP check unicast_src = %s", data->vrrp_check_unicast_src ? "true" : "false");
@@ -671,9 +670,7 @@ dump_global_data(FILE *fp, data_t * data)
 		get_process_cpu_affinity_string(&data->vrrp_cpu_mask, cpu_str, 63);
 		conf_write(fp, " VRRP CPU Affinity = %s", cpu_str);
 	}
-#if HAVE_DECL_RLIMIT_RTTIME
 	conf_write(fp, " VRRP realtime limit = %" PRI_rlim_t, data->vrrp_rlimit_rt);
-#endif
 #endif
 #ifdef _WITH_LVS_
 	conf_write(fp, " Checker process priority = %d", data->checker_process_priority);
@@ -683,9 +680,7 @@ dump_global_data(FILE *fp, data_t * data)
 		get_process_cpu_affinity_string(&data->checker_cpu_mask, cpu_str, 63);
 		conf_write(fp, " Checker CPU Affinity = %s", cpu_str);
 	}
-#if HAVE_DECL_RLIMIT_RTTIME
 	conf_write(fp, " Checker realtime limit = %" PRI_rlim_t, data->checker_rlimit_rt);
-#endif
 #endif
 #ifdef _WITH_BFD_
 	conf_write(fp, " BFD process priority = %d", data->bfd_process_priority);
@@ -695,9 +690,7 @@ dump_global_data(FILE *fp, data_t * data)
 		get_process_cpu_affinity_string(&data->bfd_cpu_mask, cpu_str, 63);
 		conf_write(fp, " BFD CPU Affinity = %s", cpu_str);
 	}
-#if HAVE_DECL_RLIMIT_RTTIME
 	conf_write(fp, " BFD realtime limit = %" PRI_rlim_t, data->bfd_rlimit_rt);
-#endif
 #endif
 #ifdef _WITH_SNMP_VRRP_
 	conf_write(fp, " SNMP vrrp %s", data->enable_snmp_vrrp ? "enabled" : "disabled");
@@ -726,7 +719,7 @@ dump_global_data(FILE *fp, data_t * data)
 	conf_write(fp, " vrrp_netlink_cmd_rcv_bufs_force = %d", global_data->vrrp_netlink_cmd_rcv_bufs_force);
 	conf_write(fp, " vrrp_netlink_monitor_rcv_bufs = %u", global_data->vrrp_netlink_monitor_rcv_bufs);
 	conf_write(fp, " vrrp_netlink_monitor_rcv_bufs_force = %d", global_data->vrrp_netlink_monitor_rcv_bufs_force);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	conf_write(fp, " process_monitor_rcv_bufs = %u", global_data->process_monitor_rcv_bufs);
 	conf_write(fp, " process_monitor_rcv_bufs_force = %d", global_data->process_monitor_rcv_bufs_force);
 #endif
@@ -764,8 +757,6 @@ dump_global_data(FILE *fp, data_t * data)
 #endif
 	if ((val = get_cur_priority()))
 		conf_write(fp, " current realtime priority = %u", val);
-#if HAVE_DECL_RLIMIT_RTTIME
 	if ((val = get_cur_rlimit_rttime()))
 		conf_write(fp, " current realtime time limit = %u", val);
-#endif
 }

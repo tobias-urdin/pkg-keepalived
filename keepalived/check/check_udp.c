@@ -38,9 +38,6 @@
 #include "smtp.h"
 #include "utils.h"
 #include "parser.h"
-#if !HAVE_DECL_SOCK_CLOEXEC
-#include "old_socket.h"
-#endif
 
 static void udp_connect_thread(thread_ref_t);
 
@@ -294,6 +291,7 @@ udp_check_thread(thread_ref_t thread)
 	thread_close_fd(thread);
 
 	if (status == connect_success) {
+		/* coverity[var_deref_model] - udp_check->reply_data is only set if udp_check->require_reply is set */
 		if (udp_check->reply_data && check_udp_reply(recv_buf, len, udp_check)) {
 			if (checker->is_up &&
 			    (global_data->checker_log_all_failures || checker->log_all_failures))
@@ -341,15 +339,6 @@ udp_connect_thread(thread_ref_t thread)
 
 		return;
 	}
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (set_sock_flags(fd, F_SETFL, O_NONBLOCK))
-		log_message(LOG_INFO, "Unable to set NONBLOCK on icmp_connect socket - %s (%d)", strerror(errno), errno);
-#endif
-
-#if !HAVE_DECL_SOCK_CLOEXEC
-	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
-		log_message(LOG_INFO, "Unable to set CLOEXEC on icmp_connect socket - %s (%d)", strerror(errno), errno);
-#endif
 
 	status = udp_bind_connect(fd, co, udp_check->payload, udp_check->payload_len);
 

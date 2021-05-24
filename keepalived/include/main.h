@@ -54,7 +54,6 @@ enum daemon_bits {
 extern const char *version_string;	/* keepalived version */
 extern unsigned long daemon_mode;	/* Which child processes are run */
 extern const char *conf_file;		/* Configuration file */
-extern int log_facility;		/* Optional logging facilities */
 #ifdef _WITH_VRRP_
 extern pid_t vrrp_child;		/* VRRP child process ID */
 extern const char *vrrp_pidfile;	/* overrule default pidfile */
@@ -99,5 +98,6 @@ extern int keepalived_main(int, char**); /* The "real" main function */
 
 extern unsigned child_wait_time;
 extern bool umask_cmdline;
+extern unsigned num_reloading;
 
 #endif

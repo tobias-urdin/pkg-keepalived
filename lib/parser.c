@@ -61,6 +61,7 @@
 #include "bitops.h"
 #include "utils.h"
 #include "process.h"
+#include "signals.h"
 
 #ifdef USE_MEMFD_CREATE_SYSCALL
 #ifndef SYS_memfd_create
@@ -112,8 +113,6 @@ typedef enum _include {
 	INCLUDE_B = 0x08,	/* All glob brace specifiers must match */
 } include_t;
 
-/* Some development/test options */
-// #define TRUNCATE_FILE_AFTER_READ
 
 typedef struct _defs {
 	const char *name;
@@ -2310,15 +2309,8 @@ open_conf_file(include_file_t *file)
 		file->current_line_no = 0;
 
 		if (strchr(file->globbuf.gl_pathv[i], '/')) {
-			/* If the filename contains a directory element, change to that directory.
-			   The man page open(2) states that fchdir() didn't support O_PATH until Linux 3.5,
-			   even though testing on Linux 3.1 shows it appears to work. To be safe, don't
-			   use it until Linux 3.5. */
-			file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY
-#if HAVE_DECL_O_PATH && LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
-								     | O_PATH
-#endif
-									     );
+			/* If the filename contains a directory element, change to that directory. */
+			file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY | O_PATH);
 
 			char *confpath = STRDUP(file->globbuf.gl_pathv[i]);
 			dirname(confpath);
@@ -2629,15 +2621,8 @@ read_line(char *buf, size_t size)
 						file->current_file_name = file->file_name;
 						list_head_add(&file->e_list, &include_stack);
 						if (strchr(file->current_file_name, '/')) {
-							/* If the filename contains a directory element, change to that directory.
-							   The man page open(2) states that fchdir() didn't support O_PATH until Linux 3.5,
-							   even though testing on Linux 3.1 shows it appears to work. To be safe, don't
-							   use it until Linux 3.5. */
-							file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY
-#if HAVE_DECL_O_PATH && LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
-												     | O_PATH
-#endif
-													     );
+							/* If the filename contains a directory element, change to that directory. */
+							file->curdir_fd = open(".", O_RDONLY | O_DIRECTORY | O_PATH);
 
 							char *confpath = STRDUP(buf + 2);
 							dirname(confpath);
@@ -3143,12 +3128,29 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void), bool 
 		if (!conf_copy) {
 #if defined HAVE_MEMFD_CREATE || defined USE_MEMFD_CREATE_SYSCALL
 			fd = memfd_create("/keepalived/consolidated_configuration", MFD_CLOEXEC);
+
+			/* SELinux can allow memfd_create() to succeed, but reads and writes fail.
+			 * Perversely the open does not log an SELinux error if keepalived has no
+			 * permissions for "tmpfs", but if it has read and write permissions but
+			 * not open permission, then the open fails. */
+			if (fd != -1) {
+				char read_byte;		/* coverity[suspicious_sizeof] is generated if this is an int */
+
+				if (read(fd, &read_byte, 1) == -1) {
+					if (errno == EACCES)
+						log_message(LOG_INFO, "SELinux permissions for memfd (tmpfs) appear to be missing for keepalived");
+					else
+						log_message(LOG_INFO, "read from memfd failed with errno %d - %m", errno);
+					close(fd);
+					fd = open_tmpfile(RUN_DIR, O_RDWR | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+				}
+			}
 #endif
 #ifndef HAVE_MEMFD_CREATE
 #ifdef USE_MEMFD_CREATE_SYSCALL
 			if (fd == -1 && errno == ENOSYS)
 #endif
-				fd = open_tmpfile(KA_TMP_DIR, O_RDWR | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+				fd = open_tmpfile(RUN_DIR, O_RDWR | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
 #endif
 			if (fd == -1)
 				log_message(LOG_INFO, "memfd_create error %d - %m", errno);
@@ -3158,14 +3160,14 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void), bool 
 					log_message(LOG_INFO, "fdopen of memfd_create error %d - %m", errno);
 			}
 		} else {
-#ifndef TRUNCATE_FILE_AFTER_READ
 			if (ftruncate(fileno(conf_copy), 0))
 				log_message(LOG_INFO, "Failed to truncate config copy file (%d) - %m", errno);
-#endif
 
 			rewind(conf_copy);
 		}
-		write_conf_copy = true;
+
+		if (conf_copy)
+			write_conf_copy = true;
 	}
 
 	if (!copy_config && conf_copy) {
@@ -3211,17 +3213,13 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void), bool 
 						      , block_depth, EOB, BOB);
 	}
 
-	if (write_conf_copy) {
+	if (conf_copy && write_conf_copy) {
 		fflush(conf_copy);
 		write_conf_copy = false;
 
 		/* Set file offset to beginning ready for next write */
 		rewind(conf_copy);
 	}
-
-	/* If we are not the parent, tell it we have completed reading the configuration */
-	if (prog_type != PROG_TYPE_PARENT && !__test_bit(CONFIG_TEST_BIT, &debug))
-		kill(getppid(), SIGPWR);
 
 	/* Close the password database if it was opened */
 	endpwent();
@@ -3230,15 +3228,6 @@ init_data(const char *conf_file, const vector_t * (*init_keywords) (void), bool 
 	free_parser_data();
 
 	notify_resource_release();
-}
-
-void
-truncate_config_copy(void)
-{
-#ifdef TRUNCATE_FILE_AFTER_READ
-	if (conf_copy && ftruncate(fileno(conf_copy), 0))
-		log_message(LOG_INFO, "Failed to truncate config copy file (%d) - %m", errno);
-#endif
 }
 
 int
@@ -3348,7 +3337,10 @@ separate_config_file(void)
 	 * it can be read independantly from the other keepalived processes */
 	fd_orig = fileno(conf_copy);
 	snprintf(buf, sizeof(buf), "/proc/self/fd/%d", fd_orig);
-	fd = open(buf, O_RDONLY);
+	if ((fd = open(buf, O_RDONLY)) == -1) {
+		log_message(LOG_INFO, "Failed to open %s for conf_copy", buf);
+		return;
+	}
 #ifdef HAVE_DUP3
 	dup3(fd, fd_orig, O_CLOEXEC);
 #else

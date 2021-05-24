@@ -54,14 +54,20 @@
 #include "memory.h"
 #ifdef _WITH_VRRP_
 #include "vrrp_daemon.h"
+#ifdef _WITH_NFTABLES_
+#include "vrrp_nftables.h"
 #endif
-
-#if HAVE_DECL_CLONE_NEWNET
+#endif
+#ifdef _WITH_LVS_
+#ifdef _WITH_NFTABLES_
+#include "check_nftables.h"
+#endif
+#endif
 #include "namespaces.h"
-#endif
 
 /* Defined in kernel source file include/linux/sched.h but
- * not currently exposed to userspace */
+ * not currently (Linux v5.10.12) exposed to userspace.
+ * Also not currently exposed by glibc (v2.32). */
 #ifndef TASK_COMM_LEN
 #define TASK_COMM_LEN	16
 #endif
@@ -713,7 +719,7 @@ get_cpu_affinity(const vector_t *strvec, cpu_set_t *set, const char *process)
 
 	return 0;
 }
-#if HAVE_DECL_RLIMIT_RTTIME == 1
+
 static rlim_t
 get_rt_rlimit(const vector_t *strvec, const char *process)
 {
@@ -739,7 +745,6 @@ get_rt_rlimit(const vector_t *strvec, const char *process)
 	rlim = limit;
 	return rlim;
 }
-#endif
 
 static int8_t
 get_priority(const vector_t *strvec, const char *process)
@@ -1012,10 +1017,8 @@ vrrp_ipsets_handler(const vector_t *strvec)
 	FREE_CONST_PTR(global_data->vrrp_ipset_address);
 	FREE_CONST_PTR(global_data->vrrp_ipset_address6);
 	FREE_CONST_PTR(global_data->vrrp_ipset_address_iface6);
-#ifdef HAVE_IPSET_ATTR_IFACE
 	FREE_CONST_PTR(global_data->vrrp_ipset_igmp);
 	FREE_CONST_PTR(global_data->vrrp_ipset_mld);
-#endif
 
 	if (vector_size(strvec) < 2) {
 		global_data->using_ipsets = false;
@@ -1060,7 +1063,6 @@ vrrp_ipsets_handler(const vector_t *strvec)
 		global_data->vrrp_ipset_address_iface6 = STRDUP(set_name);
 	}
 
-#ifdef HAVE_IPSET_ATTR_IFACE
 	if (vector_size(strvec) >= 5) {
 		if (strlen(strvec_slot(strvec,4)) >= IPSET_MAXNAMELEN - 1) {
 			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset IGMP name too long - ignored");
@@ -1089,11 +1091,24 @@ vrrp_ipsets_handler(const vector_t *strvec)
 		strcat(set_name, "_mld");
 		global_data->vrrp_ipset_mld = STRDUP(set_name);
 	}
-#endif
 }
 #endif
+#elif defined _WITH_NFTABLES_
+
+/* Allow legacy vrrp_iptables/vrrp_ipsets global_defs config to use nftables */
+static void
+vrrp_iptables_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	report_config_error(CONFIG_GENERAL_ERROR, "iptables not supported, using nftables instead. Please replace 'vrrp_iptables and 'vrrp_ipsets' with 'nftables' config option");
+
+	/* Table name defaults to "keepalived" */
+	global_data->vrrp_nf_table_name = STRDUP(DEFAULT_NFTABLES_TABLE);
+	global_data->vrrp_nf_chain_priority = -1;
+}
 #endif
+
 #ifdef _WITH_NFTABLES_
+#ifdef _WITH_VRRP_
 static void
 vrrp_nftables_handler(__attribute__((unused)) const vector_t *strvec)
 {
@@ -1112,7 +1127,7 @@ vrrp_nftables_handler(__attribute__((unused)) const vector_t *strvec)
 		name = strvec_slot(strvec, 1);
 	}
 	else {
-		/* Table named defaults to "keepalived" */
+		/* Table name defaults to "keepalived" */
 		name = DEFAULT_NFTABLES_TABLE;
 	}
 
@@ -1130,14 +1145,65 @@ vrrp_nftables_priority_handler(const vector_t *strvec)
 		report_config_error(CONFIG_INVALID_NUMBER, "invalid nftables chain priority '%s'", strvec_slot(strvec, 1));
 }
 static void
-vrrp_nftables_counters_handler(__attribute__((unused)) const vector_t *strvec)
-{
-	global_data->vrrp_nf_counters = true;
-}
-static void
 vrrp_nftables_ifindex_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	global_data->vrrp_nf_ifindex = true;
+}
+#endif
+
+#ifdef _WITH_LVS_
+static void
+ipvs_nftables_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	const char *name;
+
+	if (global_data->ipvs_nf_table_name) {
+		report_config_error(CONFIG_GENERAL_ERROR, "ipvs nftables already specified - ignoring");
+		return;
+	}
+
+	if (vector_size(strvec) >= 2) {
+		if (strlen(strvec_slot(strvec, 1)) >= NFT_TABLE_MAXNAMELEN) {
+			report_config_error(CONFIG_GENERAL_ERROR, "ipvs nftables table name too long - ignoring");
+			return;
+		}
+		name = strvec_slot(strvec, 1);
+	}
+	else {
+		/* Table named defaults to "keepalived_ipvs" */
+		name = DEFAULT_NFTABLES_IPVS_TABLE;
+	}
+
+	global_data->ipvs_nf_table_name = STRDUP(name);
+	global_data->ipvs_nf_chain_priority = -1;
+	global_data->ipvs_nftables_start_fwmark = DEFAULT_IPVS_NF_START_FWMARK;
+}
+static void
+ipvs_nftables_priority_handler(const vector_t *strvec)
+{
+	int priority;
+
+	if (read_int_strvec(strvec, 1, &priority, INT32_MIN, INT32_MAX, false))
+		global_data->ipvs_nf_chain_priority = priority;
+	else
+		report_config_error(CONFIG_INVALID_NUMBER, "invalid ipvs nftables chain priority '%s'", strvec_slot(strvec, 1));
+}
+static void
+ipvs_nftables_start_fwmark_handler(const vector_t *strvec)
+{
+	unsigned fwmark;
+
+	if (read_unsigned_strvec(strvec, 1, &fwmark, 1, UINT32_MAX, false))
+		global_data->ipvs_nftables_start_fwmark = fwmark;
+	else
+		report_config_error(CONFIG_INVALID_NUMBER, "invalid ipvs nftables start_fwmark priority '%s'", strvec_slot(strvec, 1));
+}
+#endif
+
+static void
+nftables_counters_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	global_data->nf_counters = true;
 }
 #endif
 static void
@@ -1191,13 +1257,11 @@ vrrp_cpu_affinity_handler(const vector_t *strvec)
 {
 	get_cpu_affinity(strvec, &global_data->vrrp_cpu_mask, "vrrp");
 }
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 static void
 vrrp_rt_rlimit_handler(const vector_t *strvec)
 {
 	global_data->vrrp_rlimit_rt = get_rt_rlimit(strvec, "vrrp");
 }
-#endif
 #endif
 
 static void
@@ -1327,13 +1391,11 @@ checker_cpu_affinity_handler(const vector_t *strvec)
 {
 	get_cpu_affinity(strvec, &global_data->checker_cpu_mask, "checker");
 }
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 static void
 checker_rt_rlimit_handler(const vector_t *strvec)
 {
 	global_data->checker_rlimit_rt = get_rt_rlimit(strvec, "checker");
 }
-#endif
 #endif
 
 #ifdef _WITH_BFD_
@@ -1361,13 +1423,11 @@ bfd_cpu_affinity_handler(const vector_t *strvec)
 {
 	get_cpu_affinity(strvec, &global_data->bfd_cpu_mask, "bfd");
 }
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 static void
 bfd_rt_rlimit_handler(const vector_t *strvec)
 {
 	global_data->bfd_rlimit_rt = get_rt_rlimit(strvec, "bfd");
 }
-#endif
 #endif
 
 #ifdef _WITH_SNMP_
@@ -1442,7 +1502,7 @@ snmp_checker_handler(__attribute__((unused)) const vector_t *strvec)
 }
 #endif
 #endif
-#if HAVE_DECL_CLONE_NEWNET
+
 static void
 net_namespace_handler(const vector_t *strvec)
 {
@@ -1488,7 +1548,6 @@ namespace_ipsets_handler(const vector_t *strvec)
 
 	global_data->namespace_with_ipsets = true;
 }
-#endif
 
 #ifdef _WITH_DBUS_
 static void
@@ -1726,7 +1785,7 @@ vrrp_netlink_cmd_rcv_bufs_force_handler(const vector_t *strvec)
 	global_data->vrrp_netlink_cmd_rcv_bufs_force = res;
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 process_monitor_rcv_bufs_handler(const vector_t *strvec)
 {
@@ -2071,11 +2130,9 @@ init_global_keywords(bool global_active)
 #ifdef _WITH_LINKBEAT_
 	install_keyword_root("linkbeat_use_polling", use_polling_handler, global_active);
 #endif
-#if HAVE_DECL_CLONE_NEWNET
 	install_keyword_root("net_namespace", &net_namespace_handler, global_active);
 	install_keyword_root("net_namespace_ipvs", &net_namespace_ipvs_handler, global_active);
 	install_keyword_root("namespace_with_ipsets", &namespace_ipsets_handler, global_active);
-#endif
 	install_keyword_root("use_pid_dir", &use_pid_dir_handler, global_active);
 	install_keyword_root("instance", &instance_handler, global_active);
 	install_keyword_root("child_wait_time", &child_wait_handler, global_active);
@@ -2145,17 +2202,27 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("vrrp_higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
 	install_keyword("vrrp_version", &vrrp_version_handler);
-#ifdef _WITH_IPTABLES_
+#if defined _WITH_IPTABLES_ || defined _WITH_NFTABLES_
+	/* We keep the vrrp_iptables command for legacy reasons, and
+	 * will use nftables instead if it is specified and keepalived
+	 * is not built with iptables support. */
 	install_keyword("vrrp_iptables", &vrrp_iptables_handler);
 #ifdef _HAVE_LIBIPSET_
 	install_keyword("vrrp_ipsets", &vrrp_ipsets_handler);
 #endif
 #endif
 #ifdef _WITH_NFTABLES_
+#ifdef _WITH_VRRP_
 	install_keyword("nftables", &vrrp_nftables_handler);
 	install_keyword("nftables_priority", &vrrp_nftables_priority_handler);
-	install_keyword("nftables_counters", &vrrp_nftables_counters_handler);
 	install_keyword("nftables_ifindex", &vrrp_nftables_ifindex_handler);
+#endif
+#ifdef _WITH_LVS_
+	install_keyword("nftables_ipvs", &ipvs_nftables_handler);
+	install_keyword("nftables_ipvs_priority", &ipvs_nftables_priority_handler);
+	install_keyword("nftables_ipvs_start_fwmark", &ipvs_nftables_start_fwmark_handler);
+#endif
+	install_keyword("nftables_counters", &nftables_counters_handler);
 #endif
 	install_keyword("vrrp_check_unicast_src", &vrrp_check_unicast_src_handler);
 	install_keyword("vrrp_skip_check_adv_addr", &vrrp_check_adv_addr_handler);
@@ -2164,10 +2231,8 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_no_swap", &vrrp_no_swap_handler);
 	install_keyword("vrrp_rt_priority", &vrrp_rt_priority_handler);
 	install_keyword("vrrp_cpu_affinity", &vrrp_cpu_affinity_handler);
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	install_keyword("vrrp_rlimit_rttime", &vrrp_rt_rlimit_handler);
 	install_keyword("vrrp_rlimit_rtime", &vrrp_rt_rlimit_handler);		/* Deprecated 02/02/2020 */
-#endif
 #endif
 	install_keyword("notify_fifo", &global_notify_fifo);
 	install_keyword("notify_fifo_script", &global_notify_fifo_script);
@@ -2183,20 +2248,16 @@ init_global_keywords(bool global_active)
 	install_keyword("checker_no_swap", &checker_no_swap_handler);
 	install_keyword("checker_rt_priority", &checker_rt_priority_handler);
 	install_keyword("checker_cpu_affinity", &checker_cpu_affinity_handler);
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	install_keyword("checker_rlimit_rttime", &checker_rt_rlimit_handler);
 	install_keyword("checker_rlimit_rtime", &checker_rt_rlimit_handler);	/* Deprecated 02/02/2020 */
-#endif
 #endif
 #ifdef _WITH_BFD_
 	install_keyword("bfd_priority", &bfd_prio_handler);
 	install_keyword("bfd_no_swap", &bfd_no_swap_handler);
 	install_keyword("bfd_rt_priority", &bfd_rt_priority_handler);
 	install_keyword("bfd_cpu_affinity", &bfd_cpu_affinity_handler);
-#if HAVE_DECL_RLIMIT_RTTIME == 1
 	install_keyword("bfd_rlimit_rttime", &bfd_rt_rlimit_handler);
 	install_keyword("bfd_rlimit_rtime", &bfd_rt_rlimit_handler);		/* Deprecated 02/02/2020 */
-#endif
 #endif
 #ifdef _WITH_SNMP_
 	install_keyword("snmp_socket", &snmp_socket_handler);
@@ -2229,7 +2290,7 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_netlink_cmd_rcv_bufs_force", &vrrp_netlink_cmd_rcv_bufs_force_handler);
 	install_keyword("vrrp_netlink_monitor_rcv_bufs", &vrrp_netlink_monitor_rcv_bufs_handler);
 	install_keyword("vrrp_netlink_monitor_rcv_bufs_force", &vrrp_netlink_monitor_rcv_bufs_force_handler);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	install_keyword("process_monitor_rcv_bufs", &process_monitor_rcv_bufs_handler);
 	install_keyword("process_monitor_rcv_bufs_force", &process_monitor_rcv_bufs_force_handler);
 #endif
