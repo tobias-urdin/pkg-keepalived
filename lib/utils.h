@@ -44,6 +44,14 @@
 
 #define max(a,b) ((a) >= (b) ? (a) : (b))
 
+#if defined RUN_DIR_ROOT
+#define RUN_DIR			RUN_DIR_ROOT "/run/"
+#elif defined GNU_STD_PATHS
+#define RUN_DIR			LOCAL_STATE_DIR "/run/"
+#else
+#define RUN_DIR			_PATH_VARRUN
+#endif
+
 #ifdef _WITH_PERF_
 typedef enum {
 	PERF_NONE,
@@ -223,7 +231,7 @@ extern perf_t perf_run;
 
 /* Prototypes defs */
 extern void dump_buffer(const char *, size_t, FILE *, int);
-#ifdef _CHECKSUM_DEBUG_
+#if defined _CHECKSUM_DEBUG_ || defined _RECVMSG_DEBUG_
 extern void log_buffer(const char *, const void *, size_t);
 #endif
 #ifdef _WITH_STACKTRACE_

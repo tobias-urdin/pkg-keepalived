@@ -60,7 +60,7 @@
 #include "bfd_parser.h"
 #endif
 #include "track_file.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
 
@@ -134,7 +134,6 @@ static_addresses_handler(const vector_t *strvec)
 	alloc_value_block(alloc_saddress, strvec);
 }
 
-#ifdef _HAVE_FIB_ROUTING_
 /* Static routes handler */
 static void
 static_routes_handler(const vector_t *strvec)
@@ -158,7 +157,6 @@ static_rules_handler(const vector_t *strvec)
 
 	alloc_value_block(alloc_srule, strvec);
 }
-#endif
 
 #ifdef _WITH_LINKBEAT_
 static void
@@ -272,7 +270,7 @@ vrrp_group_track_file_handler(const vector_t *strvec)
 	alloc_value_block(alloc_vrrp_group_track_file, strvec);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 vrrp_group_track_process_handler(const vector_t *strvec)
 {
@@ -380,6 +378,22 @@ vrrp_sg_tracking_weight_handler(__attribute__((unused)) const vector_t *strvec)
 	vgroup->sgroup_tracking_weight = true;
 }
 static void
+vrrp_sg_notify_priority_changes_handler(const vector_t *strvec)
+{
+	vrrp_sgroup_t *vgroup = list_last_entry(&vrrp_data->vrrp_sync_group, vrrp_sgroup_t, e_list);
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) Invalid value '%s' for sync group notify_priority_changes specified", vgroup->gname, strvec_slot(strvec, 1));
+			return;
+		}
+	}
+
+	vgroup->notify_priority_changes = res;
+}
+static void
 vrrp_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp;
@@ -412,13 +426,18 @@ vrrp_handler(const vector_t *strvec)
 static void
 vrrp_end_handler(void)
 {
-#ifdef _HAVE_VRRP_VMAC_
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
+#ifdef _HAVE_VRRP_VMAC_
 	if (!list_empty(&vrrp->unicast_peer) && vrrp->vmac_flags) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast peers - clearing use_vmac", vrrp->iname);
-		vrrp->vmac_flags = 0;
-		vrrp->vmac_ifname[0] = '\0';
+		if (!vrrp->ifp) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast peers and no interface - clearing use_vmac", vrrp->iname);
+			vrrp->vmac_flags = 0;
+			vrrp->vmac_ifname[0] = '\0';
+		} else if (!__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unicast with use_vmac requires vmac_xmit_base - setting", vrrp->iname);
+			__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags);
+		}
 	}
 #endif
 
@@ -457,6 +476,7 @@ vrrp_vmac_handler(const vector_t *strvec)
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	interface_t *ifp;
 	const char *name;
+	vrrp_t *ovrrp;
 
 	__set_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags);
 
@@ -468,6 +488,14 @@ vrrp_vmac_handler(const vector_t *strvec)
 			return;
 		}
 
+		/* Check another vrrp instance isn't using this name */
+		list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
+			if (!strcmp(name, ovrrp->vmac_ifname)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, name);
+				return;
+			}
+		}
+
 		strcpy(vrrp->vmac_ifname, name);
 
 		/* Check if the interface exists and is a macvlan we can use */
@@ -477,6 +505,14 @@ vrrp_vmac_handler(const vector_t *strvec)
 			vrrp->vmac_ifname[0] = '\0';
 		}
 	}
+}
+
+static void
+vrrp_vmac_addr_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	__set_bit(VRRP_VMAC_ADDR_BIT, &vrrp->vmac_flags);
 }
 static void
 vrrp_vmac_xmit_base_handler(__attribute__((unused)) const vector_t *strvec)
@@ -491,10 +527,12 @@ static void
 vrrp_ipvlan_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	vrrp_t *ovrrp;
 	interface_t *ifp;
 	bool had_flags = false;
 	ip_address_t addr = {};
 	size_t i;
+	const char *ifname;
 
 	if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) use_ipvlan already specified", vrrp->iname);
@@ -568,9 +606,9 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 			if (vrrp->saddr.ss_family == AF_UNSPEC) {
 				vrrp->saddr.ss_family = vrrp->ipvlan_addr->ifa.ifa_family;
 				if (vrrp->saddr.ss_family == AF_INET)
-					((struct sockaddr_in *)&vrrp->saddr)->sin_addr = vrrp->ipvlan_addr->u.sin.sin_addr;
+					PTR_CAST(struct sockaddr_in, &vrrp->saddr)->sin_addr = vrrp->ipvlan_addr->u.sin.sin_addr;
 				else
-					((struct sockaddr_in6 *)&vrrp->saddr)->sin6_addr = vrrp->ipvlan_addr->u.sin6_addr;
+					PTR_CAST(struct sockaddr_in6, &vrrp->saddr)->sin6_addr = vrrp->ipvlan_addr->u.sin6_addr;
 				vrrp->saddr_from_config = true;
 			}
 
@@ -582,12 +620,21 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 			continue;
 		}
 
-		if (strlen(strvec_slot(strvec, i)) >= IFNAMSIZ) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s) IPVLAN interface name '%s' too long - ignoring", vrrp->iname, strvec_slot(strvec, i));
+		ifname = strvec_slot(strvec, i);
+		if (strlen(ifname) >= IFNAMSIZ) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s) IPVLAN interface name '%s' too long - ignoring", vrrp->iname, ifname);
 			continue;
 		}
 
-		strcpy(vrrp->vmac_ifname, strvec_slot(strvec, i));
+		/* Check another vrrp instance isn't using this name */
+		list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
+			if (!strcmp(ifname, ovrrp->vmac_ifname)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, ifname);
+				continue;
+			}
+		}
+
+		strcpy(vrrp->vmac_ifname, ifname);
 
 		/* Check if the interface exists and is ipvlan we can use */
 		if ((ifp = if_get_by_ifname(vrrp->vmac_ifname, IF_NO_CREATE)) &&
@@ -708,7 +755,7 @@ vrrp_track_file_handler(const vector_t *strvec)
 {
 	alloc_value_block(alloc_vrrp_track_file, strvec);
 }
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 vrrp_track_process_handler(const vector_t *strvec)
 {
@@ -1109,6 +1156,32 @@ vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 
 	vrrp->garp_lower_prio_rep = garp_lower_prio_rep;
 }
+#ifdef _HAVE_VRRP_VMAC_
+static void
+vrrp_vmac_garp_intvl_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	unsigned delay = UINT_MAX;
+	unsigned index;
+
+	for (index = 1; index < vector_size(strvec); index++) {
+		if (!strcmp(strvec_slot(strvec, index), "all"))
+			vrrp->vmac_garp_all_if = true;
+		else if (!read_unsigned_strvec(strvec, index, &delay, 0, 86400, true)) {
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): vmac_garp_intvl '%s' invalid - ignoring", vrrp->iname, strvec_slot(strvec, index));
+			return;
+		}
+	}
+
+	if (delay == UINT_MAX) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): vmac_garp_intvl specified without time - ignoring", vrrp->iname);
+		return;
+	}
+
+	vrrp->vmac_garp_intvl.tv_sec = delay;
+	vrrp->vmac_garp_intvl.tv_usec = 0;
+}
+#endif
 static void
 vrrp_lower_prio_no_advert_handler(const vector_t *strvec)
 {
@@ -1210,7 +1283,6 @@ vrrp_promote_secondaries_handler(__attribute__((unused)) const vector_t *strvec)
 
 	vrrp->promote_secondaries = true;
 }
-#ifdef _HAVE_FIB_ROUTING_
 static void
 vrrp_vroutes_handler(const vector_t *strvec)
 {
@@ -1221,7 +1293,6 @@ vrrp_vrules_handler(const vector_t *strvec)
 {
 	alloc_value_block(alloc_vrrp_vrule, strvec);
 }
-#endif
 static void
 vrrp_script_handler(const vector_t *strvec)
 {
@@ -1373,7 +1444,7 @@ vrrp_vscript_end_handler(void)
 	vscript->script.gid = default_script_gid;
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 vrrp_tprocess_handler(const vector_t *strvec)
 {
@@ -1776,10 +1847,8 @@ init_vrrp_keywords(bool active)
 
 	/* Static addresses/routes/rules declarations */
 	install_keyword_root("static_ipaddress", &static_addresses_handler, active);
-#ifdef _HAVE_FIB_ROUTING_
 	install_keyword_root("static_routes", &static_routes_handler, active);
 	install_keyword_root("static_rules", &static_rules_handler, active);
-#endif
 
 	/* Sync group declarations */
 	install_keyword_root("vrrp_sync_group", &vrrp_sync_group_handler, active);
@@ -1787,7 +1856,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("track_interface", &vrrp_group_track_if_handler);
 	install_keyword("track_script", &vrrp_group_track_scr_handler);
 	install_keyword("track_file", &vrrp_group_track_file_handler);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	install_keyword("track_process", &vrrp_group_track_process_handler);
 #endif
 #ifdef _WITH_BFD_
@@ -1801,6 +1870,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("smtp_alert", &vrrp_gsmtp_handler);
 	install_keyword("global_tracking", &vrrp_gglobal_tracking_handler);
 	install_keyword("sync_group_tracking_weight", &vrrp_sg_tracking_weight_handler);
+	install_keyword("notify_priority_changes", &vrrp_sg_notify_priority_changes_handler);
 
 	/* Garp declarations */
 	install_keyword_root("garp_group", &garp_group_handler, active);
@@ -1820,6 +1890,7 @@ init_vrrp_keywords(bool active)
 	install_root_end_handler(&vrrp_end_handler);
 #ifdef _HAVE_VRRP_VMAC_
 	install_keyword("use_vmac", &vrrp_vmac_handler);
+	install_keyword("use_vmac_addr", &vrrp_vmac_addr_handler);
 	install_keyword("vmac_xmit_base", &vrrp_vmac_xmit_base_handler);
 #endif
 #ifdef _HAVE_VRRP_IPVLAN_
@@ -1837,7 +1908,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("track_interface", &vrrp_track_if_handler);
 	install_keyword("track_script", &vrrp_track_scr_handler);
 	install_keyword("track_file", &vrrp_track_file_handler);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	install_keyword("track_process", &vrrp_track_process_handler);
 #endif
 #ifdef _WITH_BFD_
@@ -1857,10 +1928,8 @@ init_vrrp_keywords(bool active)
 #ifdef _WITH_LINKBEAT_
 	install_keyword("linkbeat_use_polling", &vrrp_linkbeat_handler);
 #endif
-#ifdef _HAVE_FIB_ROUTING_
 	install_keyword("virtual_routes", &vrrp_vroutes_handler);
 	install_keyword("virtual_rules", &vrrp_vrules_handler);
-#endif
 	install_keyword("accept", &vrrp_accept_handler);
 #ifdef _WITH_FIREWALL_
 	install_keyword("no_accept", &vrrp_no_accept_handler);
@@ -1889,6 +1958,9 @@ init_vrrp_keywords(bool active)
 	install_keyword("garp_master_refresh_repeat", &vrrp_garp_refresh_rep_handler);
 	install_keyword("garp_lower_prio_delay", &vrrp_garp_lower_prio_delay_handler);
 	install_keyword("garp_lower_prio_repeat", &vrrp_garp_lower_prio_rep_handler);
+#ifdef _HAVE_VRRP_VMAC_
+	install_keyword("vmac_garp_intvl", &vrrp_vmac_garp_intvl_handler);
+#endif
 	install_keyword("lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
 	install_keyword("kernel_rx_buf_size", &kernel_rx_buf_size_handler);
@@ -1911,7 +1983,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("init_fail", &vrrp_vscript_init_fail_handler);
 	install_sublevel_end_handler(&vrrp_vscript_end_handler);
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	/* Track process declarations */
 	install_keyword_root("vrrp_track_process", &vrrp_tprocess_handler, active);
 	install_keyword("process", &vrrp_tprocess_process_handler);

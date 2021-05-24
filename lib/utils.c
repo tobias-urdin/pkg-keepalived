@@ -112,7 +112,7 @@ dump_buffer(const char *buff, size_t count, FILE* fp, int indent)
 	}
 }
 
-#ifdef _CHECKSUM_DEBUG_
+#if defined _CHECKSUM_DEBUG_ || defined _RECVMSG_DEBUG_
 void
 log_buffer(const char *msg, const void *buff, size_t count)
 {
@@ -148,6 +148,7 @@ write_stacktrace(const char *file_name, const char *str)
 	unsigned int nptrs;
 	unsigned int i;
 	char **strs;
+	char cmd[40];
 
 	nptrs = backtrace(buffer, 100);
 	if (file_name) {
@@ -174,6 +175,10 @@ write_stacktrace(const char *file_name, const char *str)
 			log_message(LOG_INFO, "  %s", strs[i]);
 		free(strs);	/* malloc'd by backtrace_symbols */
 	}
+
+	/* gstack() gives a more detailed stacktrace, using gdb and the bt command */
+	sprintf(cmd, "gstack %d >>%s", getpid(), file_name ? file_name : KA_TMP_DIR "/keepalived.stack");
+	system(cmd);
 }
 #endif
 
@@ -248,14 +253,7 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 			break;
 		}
 
-#ifdef IN_CLOEXEC
 		in = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-#else
-		if ((in = inotify_init()) != -1) {
-			fcntl(in, F_SETFD, FD_CLOEXEC | fcntl(n, F_GETFD));
-			fcntl(in, F_SETFL, O_NONBLOCK | fcntl(n, F_GETFL));
-		}
-#endif
 		if (in == -1) {
 			log_message(LOG_INFO, "inotify_init failed %d - %m", errno);
 			break;
@@ -283,8 +281,8 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 		}
 
 		/* Parent */
-		char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
-		struct inotify_event *ie = (struct inotify_event*)buf;
+		char buf[sizeof(struct inotify_event) + NAME_MAX + 1] __attribute__((aligned(__alignof__(struct inotify_event))));
+		struct inotify_event *ie = PTR_CAST(struct inotify_event, buf);
 		struct epoll_event ee = { .events = EPOLLIN, .data.fd = in };
 
 		if ((ep = epoll_create(1)) == -1) {
@@ -338,11 +336,7 @@ run_perf(const char *process, const char *network_namespace, const char *instanc
 			/* Rename the /perf.data file */
 			strcat(orig_name, perf_name);
 			new_name = make_file_name(orig_name, process,
-#if HAVE_DECL_CLONE_NEWNET
 							network_namespace,
-#else
-							NULL,
-#endif
 							instance_name);
 
 			if (rename(orig_name, new_name))
@@ -383,7 +377,7 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 
 	/* mop up an odd byte, if necessary */
 	if (nleft == 1)
-		sum += htons(*(const u_char *)w << 8);
+		sum += htons(*PTR_CAST_CONST(u_char, w) << 8);
 
 	if (acc)
 		*acc = sum;
@@ -397,15 +391,14 @@ in_csum(const uint16_t *addr, size_t len, uint32_t csum, uint32_t *acc)
 	return (answer);
 }
 
-/* IP network to ascii representation */
+/* IP network to ascii representation - address is in network byte order */
 const char *
 inet_ntop2(uint32_t ip)
 {
 	static char buf[16];
-	const unsigned char *bytep;
+	const unsigned char (*bytep)[4] = (unsigned char (*)[4])&ip;
 
-	bytep = (const unsigned char *)&ip;
-	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
+	sprintf(buf, "%d.%d.%d.%d", (*bytep)[0], (*bytep)[1], (*bytep)[2], (*bytep)[3]);
 	return buf;
 }
 
@@ -419,7 +412,7 @@ inet_ntoa2(uint32_t ip, char *buf)
 {
 	const unsigned char *bytep;
 
-	bytep = (const unsigned char *)&ip;
+	bytep = PTR_CAST_CONST(unsigned char, &ip);
 	sprintf(buf, "%d.%d.%d.%d", bytep[0], bytep[1], bytep[2], bytep[3]);
 	return buf;
 }
@@ -491,16 +484,18 @@ domain_stosockaddr(const char *domain, const char *port, struct sockaddr_storage
 
 	addr->ss_family = (sa_family_t)res->ai_family;
 
-	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
-		*addr6 = *(struct sockaddr_in6 *)res->ai_addr;
-		if (port)
-			addr6->sin6_port = htons(port_num);
-	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
-		*addr4 = *(struct sockaddr_in *)res->ai_addr;
-		if (port)
-			addr4->sin_port = htons(port_num);
+	/* Tempting as it is to do something like:
+	 *	*(struct sockaddr_in6 *)addr = *(struct sockaddr_in6 *)res->ai_addr;
+	 *  the alignment of struct sockaddr (short int) is less than the alignment of
+	 *  struct sockaddr_storage (long).
+	 */
+	memcpy(addr, res->ai_addr, res->ai_addrlen);
+
+	if (port) {
+		if (addr->ss_family == AF_INET6)
+			PTR_CAST(struct sockaddr_in6, addr)->sin6_port = htons(port_num);
+		else
+			PTR_CAST(struct sockaddr_in, addr)->sin_port = htons(port_num);
 	}
 
 	freeaddrinfo(res);
@@ -529,12 +524,12 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 	}
 
 	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 		if (port)
 			addr6->sin6_port = htons(port_num);
 		addr_ip = &addr6->sin6_addr;
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 		if (port)
 			addr4->sin_port = htons(port_num);
 		addr_ip = &addr4->sin_addr;
@@ -562,7 +557,7 @@ inet_stosockaddr(const char *ip, const char *port, struct sockaddr_storage *addr
 void
 inet_ip4tosockaddr(const struct in_addr *sin_addr, struct sockaddr_storage *addr)
 {
-	struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+	struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 	addr4->sin_family = AF_INET;
 	addr4->sin_addr = *sin_addr;
 }
@@ -571,7 +566,7 @@ inet_ip4tosockaddr(const struct in_addr *sin_addr, struct sockaddr_storage *addr
 void
 inet_ip6tosockaddr(const struct in6_addr *sin_addr, struct sockaddr_storage *addr)
 {
-	struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+	struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 	addr6->sin6_family = AF_INET6;
 	addr6->sin6_addr = *sin_addr;
 }
@@ -625,10 +620,10 @@ inet_sockaddrtos2(const struct sockaddr_storage *addr, char *addr_str)
 	const void *addr_ip;
 
 	if (addr->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *) addr;
+		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
 		addr_ip = &addr6->sin6_addr;
 	} else {
-		const struct sockaddr_in *addr4 = (const struct sockaddr_in *) addr;
+		const struct sockaddr_in *addr4 = PTR_CAST_CONST(struct sockaddr_in, addr);
 		addr_ip = &addr4->sin_addr;
 	}
 
@@ -650,13 +645,13 @@ uint16_t __attribute__ ((pure))
 inet_sockaddrport(const struct sockaddr_storage *addr)
 {
 	if (addr->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *) addr;
+		const struct sockaddr_in6 *addr6 = PTR_CAST_CONST(struct sockaddr_in6, addr);
 		return addr6->sin6_port;
 	}
 
 	/* Note: this might be AF_UNSPEC if it is the sequence number of
 	 * a virtual server in a virtual server group */
-	const struct sockaddr_in *addr4 = (const struct sockaddr_in *) addr;
+	const struct sockaddr_in *addr4 = PTR_CAST_CONST(struct sockaddr_in, addr);
 	return addr4->sin_port;
 }
 
@@ -664,10 +659,10 @@ void
 inet_set_sockaddrport(struct sockaddr_storage *addr, uint16_t port)
 {
 	if (addr->ss_family == AF_INET6) {
-		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) addr;
+		struct sockaddr_in6 *addr6 = PTR_CAST(struct sockaddr_in6, addr);
 		addr6->sin6_port = port;
 	} else {
-		struct sockaddr_in *addr4 = (struct sockaddr_in *) addr;
+		struct sockaddr_in *addr4 = PTR_CAST(struct sockaddr_in, addr);
 		addr4->sin_port = port;
 	}
 }
@@ -717,7 +712,7 @@ inet_sockaddrip4(const struct sockaddr_storage *addr)
 	if (addr->ss_family != AF_INET)
 		return 0xffffffff;
 
-	return ((const struct sockaddr_in *) addr)->sin_addr.s_addr;
+	return PTR_CAST_CONST(struct sockaddr_in, addr)->sin_addr.s_addr;
 }
 
 int
@@ -726,7 +721,7 @@ inet_sockaddrip6(const struct sockaddr_storage *addr, struct in6_addr *ip6)
 	if (addr->ss_family != AF_INET6)
 		return -1;
 
-	*ip6 = ((const struct sockaddr_in6 *) addr)->sin6_addr;
+	*ip6 = PTR_CAST_CONST(struct sockaddr_in6, addr)->sin6_addr;
 	return 0;
 }
 
@@ -737,7 +732,7 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 	int64_t addr_diff;
 
 	if (family == AF_INET) {
-		addr_diff = (int64_t)ntohl(*((const uint32_t *) a)) - (int64_t)ntohl(*((const uint32_t *) b));
+		addr_diff = (int64_t)ntohl(*PTR_CAST_CONST(uint32_t, a)) - (int64_t)ntohl(*PTR_CAST_CONST(uint32_t, b));
 		if (addr_diff > 0)
 			return 1;
 		if (addr_diff < 0)
@@ -749,7 +744,7 @@ inet_inaddrcmp(const int family, const void *a, const void *b)
 		int i;
 
 		for (i = 0; i < 4; i++ ) {
-			addr_diff = (int64_t)ntohl(((const uint32_t *) (a))[i]) - (int64_t)ntohl(((const uint32_t *) (b))[i]);
+			addr_diff = (int64_t)ntohl(PTR_CAST_CONST(uint32_t, (a))[i]) - (int64_t)ntohl(PTR_CAST_CONST(uint32_t, (b))[i]);
 			if (addr_diff > 0)
 				return 1;
 			if (addr_diff < 0)
@@ -769,12 +764,12 @@ inet_sockaddrcmp(const struct sockaddr_storage *a, const struct sockaddr_storage
 
 	if (a->ss_family == AF_INET)
 		return inet_inaddrcmp(a->ss_family,
-				      &((const struct sockaddr_in *) a)->sin_addr,
-				      &((const struct sockaddr_in *) b)->sin_addr);
+				      &PTR_CAST_CONST(struct sockaddr_in, a)->sin_addr,
+				      &PTR_CAST_CONST(struct sockaddr_in, b)->sin_addr);
 	if (a->ss_family == AF_INET6)
 		return inet_inaddrcmp(a->ss_family,
-				      &((const struct sockaddr_in6 *) a)->sin6_addr,
-				      &((const struct sockaddr_in6 *) b)->sin6_addr);
+				      &PTR_CAST_CONST(const struct sockaddr_in6, a)->sin6_addr,
+				      &PTR_CAST_CONST(const struct sockaddr_in6, b)->sin6_addr);
 	return 0;
 }
 
@@ -859,9 +854,12 @@ format_mac_buf(char *op, size_t op_len, const unsigned char *addr, size_t addr_l
 		return;
 	}
 
-	for (i = 0; i < addr_len; i++)
+	for (i = 0; i < addr_len; i++) {
 		op += snprintf(op, buf_end - op, "%.2x%s",
 		      addr[i], i < addr_len -1 ? ":" : "");
+		if (op >= buf_end - 1)
+			break;
+	}
 }
 
 /* Getting localhost official canonical name */
@@ -1046,8 +1044,6 @@ set_std_fd(bool force)
 		}
 	}
 
-	signal_fd_close(STDERR_FILENO+1);
-
 	/* coverity[leaked_handle] */
 }
 
@@ -1064,20 +1060,8 @@ int
 open_pipe(int pipe_arr[2])
 {
 	/* Open pipe */
-#ifdef HAVE_PIPE2
 	if (pipe2(pipe_arr, O_CLOEXEC | O_NONBLOCK) == -1)
-#else
-	if (pipe(pipe_arr) == -1)
-#endif
 		return -1;
-
-#ifndef HAVE_PIPE2
-	fcntl(pipe_arr[0], F_SETFL, O_NONBLOCK | fcntl(pipe_arr[0], F_GETFL));
-	fcntl(pipe_arr[1], F_SETFL, O_NONBLOCK | fcntl(pipe_arr[1], F_GETFL));
-
-	fcntl(pipe_arr[0], F_SETFD, FD_CLOEXEC | fcntl(pipe_arr[0], F_GETFD));
-	fcntl(pipe_arr[1], F_SETFD, FD_CLOEXEC | fcntl(pipe_arr[1], F_GETFD));
-#endif
 
 	return 0;
 }

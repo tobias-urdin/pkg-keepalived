@@ -48,9 +48,16 @@
 #include "scheduler.h"
 #include "process.h"
 #include "utils.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
+#ifdef _USE_SYSTEMD_NOTIFY_
+#include "systemd.h"
+#endif
+#ifndef _ONE_PROCESS_DEBUG_
+#include "config_notify.h"
+#endif
+
 
 /* Global variables */
 int bfd_vrrp_event_pipe[2] = { -1, -1};
@@ -151,7 +158,14 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 
 	alloc_bfd_buffer();
 
-	init_data(conf_file, bfd_init_keywords);
+	init_data(conf_file, bfd_init_keywords, false);
+
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
+#endif
+
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -165,7 +179,15 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 	/* If we are just testing the configuration, then we terminate now */
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
+
 	bfd_complete_init();
+
+#ifndef _ONE_PROCESS_DEBUG_
+	if (global_data->reload_check_config && get_config_status() != CONFIG_OK) {
+		stop_bfd(KEEPALIVED_EXIT_CONFIG);
+		return;
+	}
+#endif
 
 	/* Post initializations */
 #ifdef _MEM_CHECK_
@@ -181,10 +203,7 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 // TODO - measure max stack usage
 	set_process_priorities(
 			global_data->bfd_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-			global_data->bfd_rlimit_rt,
-#endif
-			global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
+			global_data->bfd_rlimit_rt, global_data->bfd_process_priority, global_data->bfd_no_swap ? 4096 : 0);
 
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->bfd_cpu_mask, "bfd");
@@ -299,7 +318,8 @@ bfd_respawn_thread(thread_ref_t thread)
 	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
 		thread_add_terminate_event(thread->master);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "BFD child process(%d) died: Respawning", thread->u.c.pid);
+		log_child_died("BFD", thread->u.c.pid);
+
 		restart_delay = calc_restart_delay(&bfd_start_time, &bfd_next_restart_delay, "BFD");
 		if (!restart_delay)
 			start_bfd_child();
@@ -374,7 +394,7 @@ start_bfd_child(void)
 	/* Close the read end of the event notification pipes, and the track_process fd */
 #ifdef _WITH_VRRP_
 	close(bfd_vrrp_event_pipe[0]);
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	close_track_processes();
 #endif
 #endif
@@ -384,11 +404,7 @@ start_bfd_child(void)
 
 	initialise_debug_options();
 
-	if ((global_data->instance_name
-#if HAVE_DECL_CLONE_NEWNET
-			   || global_data->network_namespace
-#endif
-					       ) &&
+	if ((global_data->instance_name || global_data->network_namespace) &&
 	     (bfd_syslog_ident = make_syslog_ident(PROG_BFD)))
 		syslog_ident = bfd_syslog_ident;
 	else
@@ -396,18 +412,13 @@ start_bfd_child(void)
 
 	/* Opening local BFD syslog channel */
 	if (!__test_bit(NO_SYSLOG_BIT, &debug))
-		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+		open_syslog(syslog_ident);
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		open_log_file(log_file_name,
 				"bfd",
-#if HAVE_DECL_CLONE_NEWNET
 				global_data->network_namespace,
-#else
-				NULL,
-#endif
 				global_data->instance_name);
 #endif
 
@@ -420,6 +431,9 @@ start_bfd_child(void)
 	/* Clear any child finder functions set in parent */
 	set_child_finder_name(NULL);
 
+	/* Create an independant file descriptor for the shared config file */
+	separate_config_file();
+
 	/* Child process part, write pidfile */
 	if (!pidfile_write(bfd_pidfile, getpid())) {
 		/* Fatal error */
@@ -427,6 +441,10 @@ start_bfd_child(void)
 			    "BFD child process: cannot write pidfile");
 		exit(0);
 	}
+
+#ifdef _USE_SYSTEMD_NOTIFY_
+	systemd_unset_notify();
+#endif
 
 	/* Create the new master thread */
 	thread_destroy_master(master);
@@ -447,6 +465,9 @@ start_bfd_child(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	bfd_signal_init();
+
+	/* Register emergency shutdown function */
+	register_shutdown_function(stop_bfd);
 #endif
 
 	/* Start BFD daemon */

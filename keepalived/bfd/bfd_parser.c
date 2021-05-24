@@ -97,8 +97,10 @@ bfd_nbrip_handler(const vector_t *strvec)
 		free_bfd(bfd);
 		skip_block(false);
 		return;
-	} else
-		bfd->nbr_addr = nbr_addr;
+	}
+
+	/* coverity[uninit_use] */
+	bfd->nbr_addr = nbr_addr;
 }
 
 static void
@@ -118,8 +120,10 @@ bfd_srcip_handler(const vector_t *strvec)
 			    "Configuration error: BFD instance %s has"
 			    " malformed source address %s, ignoring",
 			    bfd->iname, strvec_slot(strvec, 1));
-	} else
+	} else {
+		/* coverity[uninit_use] */
 		bfd->src_addr = src_addr;
+	}
 }
 
 static void
@@ -134,18 +138,18 @@ bfd_minrx_handler(const vector_t *strvec)
 	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
-	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MINRX_MIN, BFD_MINRX_MAX, false))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_MINRX_MIN * 1000, BFD_MINRX_MAX * 1000, 3, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " min_rx value %s is not valid (must be in range"
 			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MINRX_MIN, BFD_MINRX_MAX);
 	else
-		bfd->local_min_rx_intv = value * 1000U;
+		bfd->local_min_rx_intv = value;
 
-	if (value > BFD_MINRX_MAX_SENSIBLE)
+	if (value > BFD_MINRX_MAX_SENSIBLE * 1000)
 		log_message(LOG_INFO, "Configuration warning: BFD instance %s"
-			    " min_rx value %u is larger than max sensible (%u)",
-			    bfd->iname, value, BFD_MINRX_MAX_SENSIBLE);
+			    " min_rx value %s is larger than max sensible (%u)",
+			    bfd->iname, strvec_slot(strvec, 1), BFD_MINRX_MAX_SENSIBLE);
 }
 
 static void
@@ -160,18 +164,18 @@ bfd_mintx_handler(const vector_t *strvec)
 	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
-	if (!read_unsigned_strvec(strvec, 1, &value, BFD_MINTX_MIN, BFD_MINTX_MAX, false))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_MINTX_MIN * 1000, BFD_MINTX_MAX * 1000, 3, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " min_tx value %s is not valid (must be in range"
 			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MINTX_MIN, BFD_MINTX_MAX);
 	else
-		bfd->local_min_tx_intv = value * 1000U;
+		bfd->local_min_tx_intv = value;
 
-	if (value > BFD_MINTX_MAX_SENSIBLE)
+	if (value > BFD_MINTX_MAX_SENSIBLE * 1000)
 		log_message(LOG_INFO, "Configuration warning: BFD instance %s"
-			    " min_tx value %u is larger than max sensible (%u)",
-			    bfd->iname, value, BFD_MINTX_MAX_SENSIBLE);
+			    " min_tx value %s is larger than max sensible (%u)",
+			    bfd->iname, strvec_slot(strvec, 1), BFD_MINTX_MAX_SENSIBLE);
 }
 
 static void
@@ -186,18 +190,18 @@ bfd_idletx_handler(const vector_t *strvec)
 	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
-	if (!read_unsigned_strvec(strvec, 1, &value,BFD_IDLETX_MIN, BFD_IDLETX_MAX, false))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_IDLETX_MIN * 1000, BFD_IDLETX_MAX * 1000, 3, false))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " idle_tx value %s is not valid (must be in range"
 			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_IDLETX_MIN, BFD_IDLETX_MAX);
 	else
-		bfd->local_idle_tx_intv = value * 1000U;
+		bfd->local_idle_tx_intv = value;
 
-	if (value > BFD_IDLETX_MAX_SENSIBLE)
+	if (value > BFD_IDLETX_MAX_SENSIBLE * 1000)
 		log_message(LOG_INFO, "Configuration warning: BFD instance %s"
-			    " idle_tx value %u is larger than max sensible (%u)",
-			    bfd->iname, value, BFD_IDLETX_MAX_SENSIBLE);
+			    " idle_tx value %s is larger than max sensible (%u)",
+			    bfd->iname, strvec_slot(strvec, 1), BFD_IDLETX_MAX_SENSIBLE);
 }
 
 static void

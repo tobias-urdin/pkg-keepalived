@@ -25,6 +25,9 @@
 #include <stdio.h>
 #include <fcntl.h>
 
+/* keepalived includes */
+#include "align.h"
+
 /* genhash includes */
 #include "include/layer4.h"
 
@@ -41,7 +44,7 @@ tcp_connect(int fd, REQ * req_obj)
 	 * time for a proper shutdown. */
 	li.l_onoff = 1;
 	li.l_linger = 5;
-	if (setsockopt(fd, SOL_SOCKET, SO_LINGER, (char *) &li, sizeof (struct linger)))
+	if (setsockopt(fd, SOL_SOCKET, SO_LINGER, PTR_CAST(char, &li), sizeof (struct linger)))
 		fprintf(stderr, "Error setting SO_LINGER on socket %d\n", fd);
 
 #ifdef _WITH_SO_MARK_
@@ -62,7 +65,7 @@ tcp_connect(int fd, REQ * req_obj)
 		inet_pton(AF_INET6, req_obj->ipaddress, &adr_serv6.sin6_addr);
 
 		/* Call connect function. */
-		ret = connect(fd, (struct sockaddr *) &adr_serv6, long_inet);
+		ret = connect(fd, PTR_CAST(struct sockaddr, &adr_serv6), long_inet);
 	} else {
 		long_inet = sizeof (struct sockaddr_in);
 		memset(&adr_serv, 0, long_inet);
@@ -71,7 +74,7 @@ tcp_connect(int fd, REQ * req_obj)
 		inet_pton(AF_INET, req_obj->ipaddress, &adr_serv.sin_addr);
 
 		/* Call connect function. */
-		ret = connect(fd, (struct sockaddr *) &adr_serv, long_inet);
+		ret = connect(fd, PTR_CAST(struct sockaddr, &adr_serv), long_inet);
 	}
 
 	/* Immediate success */
@@ -107,7 +110,7 @@ tcp_socket_state(thread_ref_t thread, thread_func_t func)
 	/* Check file descriptor */
 	slen = sizeof (status);
 	if (getsockopt
-	    (thread->u.f.fd, SOL_SOCKET, SO_ERROR, (void *) &status, &slen) < 0)
+	    (thread->u.f.fd, SOL_SOCKET, SO_ERROR, (void *)&status, &slen) < 0)
 		ret = errno;
 
 	/* Connection failed !!! */
@@ -237,21 +240,12 @@ tcp_connect_thread(thread_ref_t thread)
 	SOCK *sock_obj = THREAD_ARG(thread);
 
 	if ((sock_obj->fd = socket((req->dst && req->dst->ai_family == AF_INET6) ? AF_INET6 : AF_INET,
-				   SOCK_STREAM | SOCK_NONBLOCK
-#ifdef SOCK_CLOEXEC
-					       | SOCK_CLOEXEC
-#endif
-							     , IPPROTO_TCP)) == -1) {
+				   SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP)) == -1) {
 #ifdef _GENHASH_DEBUG_
 		fprintf(stderr, "WEB connection fail to create socket.\n");
 #endif
 		return;
 	}
-
-#if !HAVE_DECL_SOCK_NONBLOCK
-	if (fcntl(sock_obj->fd, F_SETFL, fcntl(sock_obj->fd, F_GETFL) | O_NONBLOCK))
-		fprintf(stderr, "Unable to set socket non blocking\n");
-#endif
 
 	sock->status = tcp_connect(sock_obj->fd, req);
 

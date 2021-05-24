@@ -35,9 +35,6 @@
 #endif
 #include <stdbool.h>
 #include <stdio.h>
-#ifdef RTNETLINK_H_NEEDS_SYS_SOCKET_H
-#include <sys/socket.h>
-#endif
 #include <linux/rtnetlink.h>
 
 /* local include */
@@ -270,8 +267,8 @@ add_nexthop(nexthop_t *nh, struct rtmsg *rtm, struct rtattr *rta, size_t len, st
 static void
 add_nexthops(ip_route_t *route, struct nlmsghdr *nlh, struct rtmsg *rtm)
 {
-	char buf[ENCAP_RTA_SIZE];
-	struct rtattr *rta = (void *)buf;
+	char buf[ENCAP_RTA_SIZE] __attribute__((aligned(__alignof__(struct rtattr))));
+	struct rtattr *rta = PTR_CAST(struct rtattr, buf);
 	struct rtnexthop *rtnh;
 	nexthop_t *nh;
 
@@ -300,8 +297,8 @@ netlink_route(ip_route_t *iproute, int cmd)
 		struct rtmsg r;
 		char buf[RTM_SIZE];
 	} req;
-	char buf[RTA_SIZE];
-	struct rtattr *rta = (void*)buf;
+	char buf[RTA_SIZE] __attribute__((aligned(__alignof__(struct rtattr))));
+	struct rtattr *rta = PTR_CAST(struct rtattr, buf);
 
 	memset(&req, 0, sizeof (req));
 
@@ -375,8 +372,8 @@ netlink_route(ip_route_t *iproute, int cmd)
 
 #if HAVE_DECL_RTA_ENCAP
 	if (iproute->encap.type != LWTUNNEL_ENCAP_NONE) {
-		char encap_buf[ENCAP_RTA_SIZE];
-		struct rtattr *encap_rta = (void *)encap_buf;
+		char encap_buf[ENCAP_RTA_SIZE] __attribute__((aligned(__alignof__(struct rtattr))));
+		struct rtattr *encap_rta = PTR_CAST(struct rtattr, encap_buf);
 
 		encap_rta->rta_type = RTA_ENCAP;
 		encap_rta->rta_len = RTA_LENGTH(0);
@@ -488,13 +485,13 @@ netlink_route(ip_route_t *iproute, int cmd)
 	log_message(LOG_INFO, "rtmsg buffer used %lu, rtattr buffer used %d", req.n.nlmsg_len - NLMSG_LENGTH(sizeof(struct rtmsg)), rta->rta_len);
 
 	op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), "nlmsghdr %p(%u):", &req.n, req.n.nlmsg_len);
-	for (i = 0, p = (uint8_t*)&req.n; i < sizeof(struct nlmsghdr); i++)
+	for (i = 0, p = PTR_CAST(uint8_t, &req.n); i < sizeof(struct nlmsghdr); i++)
 		op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), " %2.2hhx", *(p++));
 	log_message(LOG_INFO, "%s", lbuf);
 
 	op = lbuf;
 	op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), "rtmsg %p(%lu):", &req.r, req.n.nlmsg_len - sizeof(struct nlmsghdr));
-	for (i = 0, p = (uint8_t*)&req.r; i < + req.n.nlmsg_len - sizeof(struct nlmsghdr); i++)
+	for (i = 0, p = PTR_CAST(uint8_t, &req.r); i < req.n.nlmsg_len - sizeof(struct nlmsghdr); i++)
 		op += (size_t)snprintf(op, sizeof(lbuf) - (op - lbuf), " %2.2hhx", *(p++));
 
 	for (j = 0; lbuf + j < op; j+= MAX_LOG_MSG)
@@ -516,7 +513,7 @@ netlink_route(ip_route_t *iproute, int cmd)
 
 /* Add/Delete a list of IP routes */
 bool
-netlink_rtlist(list_head_t *rt_list, int cmd)
+netlink_rtlist(list_head_t *rt_list, int cmd, bool force)
 {
 	ip_route_t *ip_route;
 
@@ -525,10 +522,10 @@ netlink_rtlist(list_head_t *rt_list, int cmd)
 		return false;
 
 	list_for_each_entry(ip_route, rt_list, e_list) {
-		if ((cmd == IPROUTE_DEL) == ip_route->set) {
+		if ((cmd == IPROUTE_DEL) == ip_route->set || force) {
 			if (!netlink_route(ip_route, cmd))
 				ip_route->set = (cmd == IPROUTE_ADD);
-			else
+			else if (cmd != IPROUTE_ADD)
 				ip_route->set = false;
 		}
 	}
@@ -589,8 +586,9 @@ print_encap_mpls(char *op, size_t len, const encap_t* encap)
 	unsigned i;
 
 	op += snprintf(op, (size_t)(buf_end - op), " encap mpls");
-	for (i = 0; i < encap->mpls.num_labels; i++)
-		op += snprintf(op, (size_t)(buf_end - op), "%s%x", i ? "/" : " ", ntohl(encap->mpls.addr[i].entry));
+	/* LGTM does not seem to be able to recognise the op < buf_end -1 in the loop control */
+	for (i = 0; i < encap->mpls.num_labels && op < buf_end - 1; i++)
+		op += snprintf(op, (size_t)(buf_end - op), "%s%x", i ? "/" : " ", ntohl(encap->mpls.addr[i].entry));	/* lgtm [cpp/overflowing-snprintf] */
 
 	return (size_t)(op - buf);
 }
@@ -682,207 +680,276 @@ format_iproute(const ip_route_t *route, char *buf, size_t buf_len)
 	nexthop_t *nh;
 	interface_t *ifp;
 
-	if (route->type != RTN_UNICAST)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s ", get_rttables_rtntype(route->type));
-	if (route->dst)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", ipaddresstos(NULL, route->dst));
-	else
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", "default");
+	/* The do {...} while(false) loop is so that we can break out of the loop if the buffer is filled */
+	do {
+		if (route->type != RTN_UNICAST)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s ", get_rttables_rtntype(route->type))) >= buf_end - 1)
+				break;
+		if (route->dst) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", ipaddresstos(NULL, route->dst))) >= buf_end - 1)
+				break;
+		} else {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s", "default")) >= buf_end - 1)
+				break;
+		}
 
-	if (route->src)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " from %s", ipaddresstos(NULL, route->src));
+		if (route->src)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " from %s", ipaddresstos(NULL, route->src))) >= buf_end - 1)
+				break;
 
 //#if HAVE_DECL_RTA_NEWDST
-//	/* MPLS only */
-//	if (route->as_to)
-//		op += (size_t)snprintf(op, (size_t)(buf_end - op), " as to %s", ipaddresstos(NULL, route->as_to));
+//		/* MPLS only */
+//		if (route->as_to)
+//			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " as to %s", ipaddresstos(NULL, route->as_to))) >= buf_end - 1)
+//				break;
 //#endif
 
-	if (route->pref_src)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " src %s", ipaddresstos(NULL, route->pref_src));
+		if (route->pref_src)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " src %s", ipaddresstos(NULL, route->pref_src))) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_DSFIELD)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " tos %u", route->tos);
+		if (route->mask & IPROUTE_BIT_DSFIELD)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " tos %u", route->tos)) >= buf_end - 1)
+				break;
 
 #if HAVE_DECL_RTA_ENCAP
-	if (route->encap.type != LWTUNNEL_ENCAP_NONE)
-		op += print_encap(op, (size_t)(buf_end - op), &route->encap);
+		if (route->encap.type != LWTUNNEL_ENCAP_NONE)
+			if ((op += print_encap(op, (size_t)(buf_end - op), &route->encap)) >= buf_end - 1)
+				break;
 #endif
 
-	if (route->via)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " via %s %s", route->via->ifa.ifa_family == AF_INET6 ? "inet6" : "inet", ipaddresstos(NULL, route->via));
+		if (route->via)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " via %s %s", route->via->ifa.ifa_family == AF_INET6 ? "inet6" : "inet", ipaddresstos(NULL, route->via))) >= buf_end - 1)
+				break;
 
-	if (route->oif)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " dev %s", route->oif->ifname);
+		if (route->oif)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " dev %s", route->oif->ifname)) >= buf_end - 1)
+				break;
 
-	if (route->table != RT_TABLE_MAIN)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " table %u", route->table);
+		if (route->table != RT_TABLE_MAIN)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " table %u", route->table)) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_PROTOCOL)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " proto %u", route->protocol);
+		if (route->mask & IPROUTE_BIT_PROTOCOL)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " proto %u", route->protocol)) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_SCOPE)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " scope %u", route->scope);
+		if (route->mask & IPROUTE_BIT_SCOPE)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " scope %u", route->scope)) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_METRIC)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " metric %u", route->metric);
+		if (route->mask & IPROUTE_BIT_METRIC)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " metric %u", route->metric)) >= buf_end - 1)
+				break;
 
-	if (route->family == AF_INET && route->flags & RTNH_F_ONLINK)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", "onlink");
+		if (route->family == AF_INET && route->flags & RTNH_F_ONLINK)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", "onlink")) >= buf_end - 1)
+				break;
 
-	if (route->realms) {
-		if (route->realms & 0xFFFF0000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " realms %" PRIu32 "/", route->realms >> 16);
-		else
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " realm ");
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), "%u", route->realms & 0xFFFF);
-	}
+		if (route->realms) {
+			if (route->realms & 0xFFFF0000) {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " realms %" PRIu32 "/", route->realms >> 16)) >= buf_end - 1)
+					break;
+			} else {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " realm ")) >= buf_end - 1)
+					break;
+			}
+
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%u", route->realms & 0xFFFF)) >= buf_end - 1)
+					break;
+		}
 
 #if HAVE_DECL_RTA_EXPIRES
-	if (route->mask & IPROUTE_BIT_EXPIRES)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " expires %" PRIu32 "sec", route->expires);
+		if (route->mask & IPROUTE_BIT_EXPIRES)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " expires %" PRIu32 "sec", route->expires)) >= buf_end - 1)
+				break;
 #endif
 
 #if HAVE_DECL_RTAX_CC_ALGO
-	if (route->congctl)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " congctl %s%s", route->congctl, route->lock & (1<<RTAX_CC_ALGO) ? "lock " : "");
+		if (route->congctl)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " congctl %s%s", route->congctl, route->lock & (1<<RTAX_CC_ALGO) ? "lock " : "")) >= buf_end - 1)
+				break;
 #endif
 
-	if (route->mask & IPROUTE_BIT_RTT) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rtt", route->lock & (1<<RTAX_RTT) ? " lock" : "");
-		if (route->rtt >= 8000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rtt / (double)8000.0F);
-		else
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rtt / 8);
-	}
+		if (route->mask & IPROUTE_BIT_RTT) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rtt", route->lock & (1<<RTAX_RTT) ? " lock" : "")) >= buf_end - 1)
+				break;
+			if (route->rtt >= 8000) {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rtt / (double)8000.0F)) >= buf_end - 1)
+					break;
+			} else {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rtt / 8)) >= buf_end - 1)
+					break;
+			}
+		}
 
-	if (route->mask & IPROUTE_BIT_RTTVAR) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rttvar", route->lock & (1<<RTAX_RTTVAR) ? " lock" : "");
-		if (route->rttvar >= 4000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rttvar / (double)4000.0F);
-		else
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rttvar / 4);
-	}
+		if (route->mask & IPROUTE_BIT_RTTVAR) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rttvar", route->lock & (1<<RTAX_RTTVAR) ? " lock" : "")) >= buf_end - 1)
+				break;
+			if (route->rttvar >= 4000) {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rttvar / (double)4000.0F)) >= buf_end - 1)
+					break;
+			} else {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rttvar / 4)) >= buf_end - 1)
+					break;
+			}
+		}
 
-	if (route->mask & IPROUTE_BIT_RTO_MIN) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rto_min", route->lock & (1<<RTAX_RTO_MIN) ? " lock" : "");
-		if (route->rto_min >= 1000)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rto_min / (double)1000.0F);
-		else
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rto_min);
-	}
+		if (route->mask & IPROUTE_BIT_RTO_MIN) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s%s ", "rto_min", route->lock & (1<<RTAX_RTO_MIN) ? " lock" : "")) >= buf_end - 1)
+				break;
+			if (route->rto_min >= 1000) {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rto_min / (double)1000.0F)) >= buf_end - 1)
+					break;
+			} else {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rto_min)) >= buf_end - 1)
+					break;
+			}
+		}
 
-	if (route->features) {
 		if (route->features & RTAX_FEATURE_ECN)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", "features ecn");
-	}
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s", "features ecn")) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_MTU) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " mtu %s%u",
-			route->lock & (1<<RTAX_MTU) ? "lock " : "",
-			route->mtu);
-	}
+		if (route->mask & IPROUTE_BIT_MTU) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " mtu %s%u",
+				   route->lock & (1<<RTAX_MTU) ? "lock " : "",
+				   route->mtu)) >= buf_end - 1)
+				break;
+		}
 
-	if (route->mask & IPROUTE_BIT_WINDOW)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " window %u", route->window);
+		if (route->mask & IPROUTE_BIT_WINDOW)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " window %u", route->window)) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_SSTHRESH) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " ssthresh %s%u",
-			route->lock & (1<<RTAX_SSTHRESH) ? "lock " : "",
-			route->ssthresh);
-	}
+		if (route->mask & IPROUTE_BIT_SSTHRESH) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " ssthresh %s%u",
+				  route->lock & (1<<RTAX_SSTHRESH) ? "lock " : "",
+				  route->ssthresh)) >= buf_end - 1)
+				break;
+		}
 
-	if (route->mask & IPROUTE_BIT_CWND) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " cwnd %s%u",
-			route->lock & (1<<RTAX_CWND) ? "lock " : "",
-			route->cwnd);
-	}
+		if (route->mask & IPROUTE_BIT_CWND) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " cwnd %s%u",
+				   route->lock & (1<<RTAX_CWND) ? "lock " : "",
+				   route->cwnd)) >= buf_end)
+				break;
+		}
 
-	if (route->mask & IPROUTE_BIT_ADVMSS) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " advmss %s%u",
-			route->lock & (1<<RTAX_ADVMSS) ? "lock " : "",
-			route->advmss);
-	}
+		if (route->mask & IPROUTE_BIT_ADVMSS) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " advmss %s%u",
+				   route->lock & (1<<RTAX_ADVMSS) ? "lock " : "",
+				   route->advmss)) >= buf_end - 1)
+				break;
+		}
 
-	if (route->mask & IPROUTE_BIT_REORDERING) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " reordering %s%u",
-			route->lock & (1<<RTAX_REORDERING) ? "lock " : "",
-			route->reordering);
-	}
+		if (route->mask & IPROUTE_BIT_REORDERING) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " reordering %s%u",
+				   route->lock & (1<<RTAX_REORDERING) ? "lock " : "",
+				   route->reordering)) >= buf_end - 1)
+				break;
+		}
 
-	if (route->mask & IPROUTE_BIT_HOPLIMIT)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " hoplimit %u", route->hoplimit);
+		if (route->mask & IPROUTE_BIT_HOPLIMIT)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " hoplimit %u", route->hoplimit)) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_INITCWND)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " initcwnd %u", route->initcwnd);
+		if (route->mask & IPROUTE_BIT_INITCWND)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " initcwnd %u", route->initcwnd)) >= buf_end - 1)
+				break;
 
-	if (route->mask & IPROUTE_BIT_INITRWND)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " initrwnd %u", route->initrwnd);
+		if (route->mask & IPROUTE_BIT_INITRWND)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " initrwnd %u", route->initrwnd)) >= buf_end - 1)
+				break;
 
 #if HAVE_DECL_RTAX_QUICKACK
-	if (route->mask & IPROUTE_BIT_QUICKACK)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " quickack %d", route->quickack);
+		if (route->mask & IPROUTE_BIT_QUICKACK)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " quickack %d", route->quickack)) >= buf_end - 1)
+				break;
 #endif
 
 #if HAVE_DECL_RTA_PREF
-	if (route->mask & IPROUTE_BIT_PREF)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %s", "pref",
-			route->pref == ICMPV6_ROUTER_PREF_LOW ? "low" :
-			route->pref == ICMPV6_ROUTER_PREF_MEDIUM ? "medium" :
-			route->pref == ICMPV6_ROUTER_PREF_HIGH ? "high" :
-			"unknown");
+		if (route->mask & IPROUTE_BIT_PREF)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %s", "pref",
+				   route->pref == ICMPV6_ROUTER_PREF_LOW ? "low" :
+				   route->pref == ICMPV6_ROUTER_PREF_MEDIUM ? "medium" :
+				   route->pref == ICMPV6_ROUTER_PREF_HIGH ? "high" :
+				   "unknown")) >= buf_end - 1)
+				break;
 #endif
 
 #if HAVE_DECL_RTAX_FASTOPEN_NO_COOKIE
-	if (route->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %d", "fastopen_no_cookie", route->fastopen_no_cookie);
+		if (route->mask & IPROUTE_BIT_FASTOPEN_NO_COOKIE)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %d", "fastopen_no_cookie", route->fastopen_no_cookie)) >= buf_end - 1)
+				break;
 #endif
 
 #if HAVE_DECL_RTA_TTL_PROPAGATE
-	if (route->mask & IPROUTE_BIT_TTL_PROPAGATE)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %sabled", "ttl-propagate", route->ttl_propagate ? "en" : "dis");
+		if (route->mask & IPROUTE_BIT_TTL_PROPAGATE)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " %s %sabled", "ttl-propagate", route->ttl_propagate ? "en" : "dis")) >= buf_end - 1)
+				break;
 #endif
 
-	list_for_each_entry(nh, &route->nhs, e_list) {
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " nexthop");
-		if (nh->addr)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " via inet%s %s"
-						 , nh->addr->ifa.ifa_family == AF_INET ? "" : "6"
-						 , ipaddresstos(NULL,nh->addr));
-		if (nh->ifp)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " dev %s", nh->ifp->ifname);
-		if (nh->mask & IPROUTE_BIT_WEIGHT)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " weight %d", nh->weight + 1);
-		if (nh->flags & RTNH_F_ONLINK)
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " onlink");
-		if (nh->realms) {
-			if (route->realms & 0xFFFF0000)
-				op += (size_t)snprintf(op, (size_t)(buf_end - op)
-							 , " realms %" PRIu32 "/", nh->realms >> 16);
-			else
-				op += (size_t)snprintf(op, (size_t)(buf_end - op), " realm ");
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), "%" PRIu32, nh->realms & 0xFFFF);
-		}
+		/* LGTM does not seem to be able to recognise the op < buf_end -1 break in the loop within a loop */
+		list_for_each_entry(nh, &route->nhs, e_list) {
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " nexthop")) >= buf_end - 1)	/* lgtm [cpp/overflowing-snprintf] */
+				break;
+			if (nh->addr)
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " via inet%s %s"	/* lgtm [cpp/overflowing-snprintf] */
+							    , nh->addr->ifa.ifa_family == AF_INET ? "" : "6"
+							    , ipaddresstos(NULL,nh->addr))) >= buf_end - 1)
+					break;
+			if (nh->ifp)
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " dev %s", nh->ifp->ifname)) >= buf_end - 1)	/* lgtm [cpp/overflowing-snprintf] */
+					break;
+			if (nh->mask & IPROUTE_BIT_WEIGHT)
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " weight %d", nh->weight + 1)) >= buf_end - 1)	/* lgtm [cpp/overflowing-snprintf] */
+					break;
+			if (nh->flags & RTNH_F_ONLINK)
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " onlink")) >= buf_end - 1)	/* lgtm [cpp/overflowing-snprintf] */
+					break;
+			if (nh->realms) {
+				if (route->realms & 0xFFFF0000) {
+					if ((op += (size_t)snprintf(op, (size_t)(buf_end - op)	/* lgtm [cpp/overflowing-snprintf] */
+								 , " realms %" PRIu32 "/", nh->realms >> 16)) >= buf_end - 1)
+						break;
+				} else {
+					if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " realm ")) >= buf_end - 1)	/* lgtm [cpp/overflowing-snprintf] */
+						break;
+				}
+
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%" PRIu32, nh->realms & 0xFFFF)) >= buf_end - 1)	/* lgtm [cpp/overflowing-snprintf] */
+					break;
+			}
 #if HAVE_DECL_RTA_ENCAP
-		if (nh->encap.type != LWTUNNEL_ENCAP_NONE)
-			op += print_encap(op, (size_t)(buf_end - op), &nh->encap);
+			if (nh->encap.type != LWTUNNEL_ENCAP_NONE)
+				if ((op += print_encap(op, (size_t)(buf_end - op), &nh->encap)) >= buf_end - 1)
+					break;
 #endif
-	}
+		}
+		if (op >= buf_end - 1)
+			break;
 
-	if (route->dont_track)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " no_track");
+		if (route->dont_track)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " no_track")) >= buf_end - 1)
+				break;
 
-	if (route->track_group)
-		op += (size_t)snprintf(op, (size_t)(buf_end - op), " track_group %s", route->track_group->gname);
+		if (route->track_group)
+			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " track_group %s", route->track_group->gname)) >= buf_end - 1)
+				break;
 
-	if (route->set &&
-	    !route->dont_track &&
-	    (!route->oif || route->oif->ifindex != route->configured_ifindex)) {
-		if ((ifp = if_get_by_ifindex(route->configured_ifindex)))
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [dev %s]", ifp->ifname);
-		else
-			op += (size_t)snprintf(op, (size_t)(buf_end - op), " [installed ifindex %" PRIu32 "]", route->configured_ifindex);
-	}
+		if (route->set &&
+		    !route->dont_track &&
+		    (!route->oif || route->oif->ifindex != route->configured_ifindex)) {
+			if ((ifp = if_get_by_ifindex(route->configured_ifindex))) {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " [dev %s]", ifp->ifname)) >= buf_end - 1)
+					break;
+			} else {
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), " [installed ifindex %" PRIu32 "]", route->configured_ifindex)) >= buf_end - 1)
+					break;
+			}
+		}
+	} while (false);
 }
 
 void
@@ -1290,7 +1357,7 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 	uint8_t family;
 	const char *dest = NULL;
 
-	new = (ip_route_t *) MALLOC(sizeof(ip_route_t));
+	PMALLOC(new);
 	if (!new) {
 		log_message(LOG_INFO, "Unable to allocate new ip_route");
 		return;
@@ -1844,7 +1911,7 @@ clear_diff_routes(list_head_t *l, list_head_t *n)
 	/* All routes removed */
 	if (list_empty(n)) {
 		log_message(LOG_INFO, "Removing a VirtualRoute block");
-		netlink_rtlist(l, IPROUTE_DEL);
+		netlink_rtlist(l, IPROUTE_DEL, false);
 		return;
 	}
 

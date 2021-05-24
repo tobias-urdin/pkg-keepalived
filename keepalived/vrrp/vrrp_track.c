@@ -45,7 +45,7 @@
 #include "vrrp_notify.h"
 #include "bitops.h"
 #include "track_file.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
 #endif
 
@@ -71,6 +71,7 @@ free_track_if(tracked_if_t *tip)
 	list_del_init(&tip->e_list);
 	FREE(tip);
 }
+
 void
 free_track_if_list(list_head_t *l)
 {
@@ -144,7 +145,7 @@ alloc_track_if(const char *name, list_head_t *l, const vector_t *strvec)
 		}
 	}
 
-	tip	    = (tracked_if_t *) MALLOC(sizeof(tracked_if_t));
+	PMALLOC(tip);
 	INIT_LIST_HEAD(&tip->e_list);
 	tip->ifp    = ifp;
 	tip->weight = weight;
@@ -267,7 +268,7 @@ alloc_track_script(const char *name, list_head_t *l, const vector_t *strvec)
 		}
 	}
 
-	tsc	    = (tracked_sc_t *) MALLOC(sizeof(tracked_sc_t));
+	PMALLOC(tsc);
 	INIT_LIST_HEAD(&tsc->e_list);
 	tsc->scr    = vsc;
 	tsc->weight = weight;
@@ -276,7 +277,7 @@ alloc_track_script(const char *name, list_head_t *l, const vector_t *strvec)
 	list_add_tail(&tsc->e_list, l);
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static vrrp_tracked_process_t * __attribute__ ((pure))
 find_tracked_process_by_name(const char *name)
 {
@@ -766,7 +767,7 @@ initialise_vrrp_file_tracking_priorities(void)
 	}
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 static void
 initialise_process_tracking_priorities(void)
 {
@@ -851,7 +852,7 @@ initialise_tracking_priorities(void)
 
 	initialise_vrrp_file_tracking_priorities();
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	initialise_process_tracking_priorities();
 #endif
 
@@ -880,7 +881,7 @@ initialise_tracking_priorities(void)
 	}
 }
 
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 void
 process_update_track_process_status(vrrp_tracked_process_t *tprocess, bool now_up)
 {

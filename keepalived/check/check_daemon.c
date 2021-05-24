@@ -71,8 +71,14 @@
 #endif
 #include "timer.h"
 #include "track_file.h"
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 #include "track_process.h"
+#endif
+#ifdef _USE_SYSTEMD_NOTIFY_
+#include "systemd.h"
+#endif
+#ifndef _ONE_PROCESS_DEBUG_
+#include "config_notify.h"
 #endif
 
 /* Global variables */
@@ -80,7 +86,7 @@ bool using_ha_suspend;
 
 /* local variables */
 static const char *check_syslog_ident;
-#ifndef __ONE_PROCESS_DEBUG_
+#ifndef _ONE_PROCESS_DEBUG_
 static bool two_phase_terminate;
 static timeval_t check_start_time;
 static unsigned check_next_restart_delay;
@@ -106,11 +112,13 @@ set_checker_max_fds(void)
 	 *   12	closed
 	 *   13	passwd file
 	 *   14	Unix domain socket
+	 *   15 memfd for config
+	 *   16 eventfd for notifying load/reload complete
 	 *   One per checker using UDP/TCP/PING
 	 *   One per SMTP alert
 	 *   qty 10 spare
 	 */
-	set_max_file_limit(14 + check_data->num_checker_fd_required + check_data->num_smtp_alert + 10);
+	set_max_file_limit(17 + check_data->num_checker_fd_required + check_data->num_smtp_alert + 10);
 }
 
 static void
@@ -244,13 +252,8 @@ checker_terminate_phase1(bool schedule_next_thread)
 		stop_track_files();
 
 	/* Send shutdown messages */
-	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug)) {
-		if (global_data->lvs_flush_onstop == LVS_FLUSH_FULL) {
-			log_message(LOG_INFO, "Flushing lvs on shutdown in oneshot");
-			ipvs_flush_cmd();
-		} else
-			clear_services();
-	}
+	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug))
+		clear_services();
 
 	if (schedule_next_thread) {
 		/* If there are no child processes, we can terminate immediately,
@@ -291,6 +294,24 @@ stop_check(int status)
 	exit(status);
 }
 
+static void
+set_effective_weights(void)
+{
+	virtual_server_t *vs;
+	real_server_t *rs;
+	checker_t *checker;
+
+	list_for_each_entry(vs, &check_data->vs, e_list) {
+		list_for_each_entry(rs, &vs->rs, e_list) {
+			rs->effective_weight = rs->iweight;
+		}
+        }
+
+	list_for_each_entry(checker, &checkers_queue, e_list) {
+		checker->rs->effective_weight += checker->cur_weight;
+	}
+}
+
 /* Daemon init sequence */
 static void
 start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
@@ -306,7 +327,13 @@ start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 		return;
 	}
 
-	init_data(conf_file, check_init_keywords);
+	init_data(conf_file, check_init_keywords, false);
+
+#ifndef _ONE_PROCESS_DEBUG_
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
+#endif
 
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
@@ -326,7 +353,11 @@ start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 	link_vsg_to_vs();
 
 	/* Post initializations */
-	if (!validate_check_config()) {
+	if (!validate_check_config()
+#ifndef _ONE_PROCESS_DEBUG_
+	    || (global_data->reload_check_config && get_config_status() != CONFIG_OK)
+#endif
+				    ) {
 		stop_check(KEEPALIVED_EXIT_CONFIG);
 		return;
 	}
@@ -412,9 +443,11 @@ start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 	init_track_files(&check_data->track_files);
 
 	/* Processing differential configuration parsing */
+	set_track_file_weights();
 	if (reload)
 		clear_diff_services(old_checkers_queue);
 	set_track_file_checkers_down();
+	set_effective_weights();
 	if (reload)
 		check_new_rs_state();
 
@@ -431,10 +464,7 @@ start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 
 	/* Set the process priority and non swappable if configured */
 	set_process_priorities(global_data->checker_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
-#if HAVE_DECL_RLIMIT_RTTIME == 1
-			       global_data->checker_rlimit_rt,
-#endif
-			       global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
+			       global_data->checker_rlimit_rt, global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
 
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->checker_cpu_mask, "checker");
@@ -461,8 +491,6 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 
 	/* set the reloading flag */
 	SET_RELOAD;
-
-	log_message(LOG_INFO, "Got SIGHUP, reloading checker configuration");
 
 	/* Terminate all script process */
 	script_killall(master, SIGTERM, false);
@@ -567,7 +595,8 @@ check_respawn_thread(thread_ref_t thread)
 	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
 		thread_add_terminate_event(thread->master);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
-		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Respawning", thread->u.c.pid);
+		log_child_died("Healthcheck", thread->u.c.pid);
+
 		restart_delay = calc_restart_delay(&check_start_time, &check_next_restart_delay, "Healthcheck");
 		if (!restart_delay)
 			start_check_child();
@@ -673,15 +702,11 @@ start_check_child(void)
 	close(bfd_vrrp_event_pipe[1]);
 #endif
 #endif
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	close_track_processes();
 #endif
 
-	if ((global_data->instance_name
-#if HAVE_DECL_CLONE_NEWNET
-			   || global_data->network_namespace
-#endif
-					       ) &&
+	if ((global_data->instance_name || global_data->network_namespace) &&
 	     (check_syslog_ident = make_syslog_ident(PROG_CHECK)))
 		syslog_ident = check_syslog_ident;
 	else
@@ -689,18 +714,13 @@ start_check_child(void)
 
 	/* Opening local CHECK syslog channel */
 	if (!__test_bit(NO_SYSLOG_BIT, &debug))
-		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+		open_syslog(syslog_ident);
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
 		open_log_file(log_file_name,
 				"check",
-#if HAVE_DECL_CLONE_NEWNET
 				global_data->network_namespace,
-#else
-				NULL,
-#endif
 				global_data->instance_name);
 #endif
 
@@ -713,11 +733,18 @@ start_check_child(void)
 	/* Clear any child finder functions set in parent */
 	set_child_finder_name(NULL);
 
+	/* Create an independant file descriptor for the shared config file */
+	separate_config_file();
+
 	/* Child process part, write pidfile */
 	if (!pidfile_write(checkers_pidfile, getpid())) {
 		log_message(LOG_INFO, "Healthcheck child process: cannot write pidfile");
 		exit(KEEPALIVED_EXIT_FATAL);
 	}
+
+#ifdef _USE_SYSTEMD_NOTIFY_
+	systemd_unset_notify();
+#endif
 
 	/* Create the new master thread */
 	thread_destroy_master(master);	/* This destroys any residual settings from the parent */
@@ -732,6 +759,9 @@ start_check_child(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	/* Signal handling initialization */
 	check_signal_init();
+
+	/* Register emergency shutdown function */
+	register_shutdown_function(stop_check);
 #endif
 
 	/* Start Healthcheck daemon */
@@ -749,9 +779,11 @@ start_check_child(void)
 	launch_thread_scheduler(master);
 
 	/* Finish healthchecker daemon process */
+#ifndef _ONE_PROCESS_DEBUG_
 	if (two_phase_terminate)
 		checker_terminate_phase2();
 	else
+#endif
 		stop_check(KEEPALIVED_EXIT_OK);
 
 #ifdef THREAD_DUMP

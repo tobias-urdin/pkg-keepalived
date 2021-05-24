@@ -110,13 +110,14 @@ typedef struct _vrrp_sgroup {
 	unsigned		num_member_fault;	/* Number of members of group in fault state */
 	unsigned		num_member_init;	/* Number of members of group in pending state */
 	int			state;			/* current stable state */
+	bool			state_same_at_reload;	/* State prior to reload */
 	bool			sgroup_tracking_weight;	/* Use floating priority and scripts
 							 * Used if need different priorities needed on a track object in a sync group.
 							 * It probably won't work properly. */
 	list_head_t		track_ifp;		/* tracked_if_t - Interface state we monitor */
 	list_head_t		track_script;		/* Script state we monitor */
 	list_head_t		track_file;		/* tracked_file_monitor_t - Files whose value we monitor */
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	list_head_t		track_process;		/* tracked_process_t - Processes we monitor */
 #endif
 #ifdef _WITH_BFD_
@@ -132,6 +133,7 @@ typedef struct _vrrp_sgroup {
 	notify_script_t		*script;
 	int			smtp_alert;
 	int			last_email_state;
+	int			notify_priority_changes;
 
 	/* linked list member */
 	list_head_t		e_list;
@@ -233,7 +235,7 @@ typedef struct _vrrp_t {
 	list_head_t		track_ifp;		/* tracked_if_t - Interface state we monitor */
 	list_head_t		track_script;		/* tracked_sc_t - Script state we monitor */
 	list_head_t		track_file;		/* tracked_file_monitor_t - Files whose value we monitor */
-#ifdef _WITH_CN_PROC_
+#ifdef _WITH_TRACK_PROCESS_
 	list_head_t		track_process;		/* tracked_process_t - Processes we monitor */
 #endif
 #ifdef _WITH_BFD_
@@ -247,9 +249,7 @@ typedef struct _vrrp_t {
 	bool			track_saddr;		/* Fault state if configured saddr is missing */
 	struct sockaddr_storage	pkt_saddr;		/* Src IP address received in VRRP IP header */
 	int			rx_ttl_hop_limit;	/* Received TTL/hop limit returned */
-#ifdef IPV6_RECVPKTINFO
 	bool			multicast_pkt;		/* Last IPv6 packet received was multicast */
-#endif
 	list_head_t		unicast_peer;		/* unicast_peer_t - peers to send unicast advert to */
 	int			ttl;			/* TTL to send packet with if unicasting */
 	bool			check_unicast_src;	/* It set, check the source address of a unicast advert */
@@ -273,6 +273,11 @@ typedef struct _vrrp_t {
 	unsigned		garp_lower_prio_rep;	/* Number of ARP messages to send at a time */
 	unsigned		lower_prio_no_advert;	/* Don't send advert after lower prio advert received */
 	unsigned		higher_prio_send_advert; /* Send advert after higher prio advert received */
+#ifdef _HAVE_VRRP_VMAC_
+	timeval_t		vmac_garp_intvl;	/* Interval between GARPs on each VMAC */
+	bool			vmac_garp_all_if;	/* Send GARPs on all i/fs, not just VMACs */
+	timeval_t		vmac_garp_timer;	/* Next scheduled GARP for each VMAC */
+#endif
 	uint8_t			vrid;			/* virtual id. from 1(!) to 255 */
 	uint8_t			base_priority;		/* configured priority value */
 	uint8_t			effective_priority;	/* effective priority value */
@@ -287,10 +292,8 @@ typedef struct _vrrp_t {
 							 */
 	bool			promote_secondaries;	/* Set promote_secondaries option on interface */
 	bool			evip_other_family;	/* There are eVIPs of the different address family from the vrrp family */
-#ifdef _HAVE_FIB_ROUTING_
 	list_head_t		vroutes;		/* ip_route_t - list of virtual routes */
 	list_head_t		vrules;			/* ip_rule_t - list of virtual rules */
-#endif
 	unsigned		adver_int;		/* locally configured delay between advertisements*/
 	unsigned		master_adver_int;	/* In v3, when we become BACKUP, we use the MASTER's
 							 * adver_int. If we become MASTER again, we use the
@@ -451,7 +454,10 @@ extern void restore_vrrp_interfaces(void);
 extern void shutdown_vrrp_instances(void);
 extern void clear_diff_vrrp(void);
 extern void clear_diff_script(void);
+extern void set_previous_sync_group_states(void);
+#ifdef _WITH_BFD_
 extern void clear_diff_bfd(void);
+#endif
 extern void vrrp_restore_interface(vrrp_t *, bool, bool);
 #ifdef THREAD_DUMP
 extern void register_vrrp_fifo_addresses(void);

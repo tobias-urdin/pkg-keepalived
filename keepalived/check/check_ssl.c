@@ -51,7 +51,7 @@ clear_ssl(ssl_data_t *ssl)
 static int
 password_cb(char *buf, int num, __attribute__((unused)) int rwflag, void *userdata)
 {
-	ssl_data_t *ssl = (ssl_data_t *) userdata;
+	ssl_data_t *ssl = PTR_CAST(ssl_data_t, userdata);
 	size_t plen = strlen(ssl->password);
 
 	if ((unsigned)num < plen + 1)
@@ -82,9 +82,9 @@ build_ssl_ctx(void)
 	SSL_load_error_strings();
 #endif
 
-	if (!check_data->ssl)
-		ssl = (ssl_data_t *) MALLOC(sizeof(ssl_data_t));
-	else
+	if (!check_data->ssl) {
+		PMALLOC(ssl);
+	} else
 		ssl = check_data->ssl;
 
 	/* Initialize SSL context */
@@ -285,12 +285,17 @@ ssl_read_thread(thread_ref_t thread)
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
 	url_t *url = http_get_check->url_it;
-	unsigned timeout = checker->co->connection_to;
+	unsigned long timeout;
 	unsigned char digest[MD5_DIGEST_LENGTH];
 	int r = 0;
 
+	timeout = timer_long(thread->sands) - timer_long(time_now);
+
 	/* Handle read timeout */
-	if (thread->type == THREAD_READ_TIMEOUT && !req->extracted) {
+	if (thread->type == THREAD_READ_TIMEOUT) {
+		SSL_set_quiet_shutdown(req->ssl, 1);
+		SSL_shutdown(req->ssl);
+
 		timeout_epilog(thread, "Timeout SSL read");
 		return;
 	}
@@ -303,8 +308,8 @@ ssl_read_thread(thread_ref_t thread)
 	if (req->error == SSL_ERROR_WANT_READ) {
 		 /* async read unfinished */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, false);
-	} else if (r > 0 && req->error == 0) {
+				thread->u.f.fd, timeout, true);
+	} else if (r > 0 && req->error == SSL_ERROR_NONE) {
 		/* Handle response stream */
 		http_process_response(req, (size_t)r, url);
 
@@ -313,10 +318,9 @@ ssl_read_thread(thread_ref_t thread)
 		 * Register itself to not perturbe global I/O multiplexer.
 		 */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, false);
+				thread->u.f.fd, timeout, true);
 	} else if (req->error) {
-
-		/* All the SSL streal has been parsed */
+		/* All the SSL stream has been parsed */
 		if (url->digest)
 			MD5_Final(digest, &req->context);
 		SSL_set_quiet_shutdown(req->ssl, 1);
