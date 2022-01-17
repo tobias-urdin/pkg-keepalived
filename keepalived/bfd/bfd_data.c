@@ -37,8 +37,6 @@ bfd_data_t *bfd_data;
 bfd_data_t *old_bfd_data;
 char *bfd_buffer;
 
-/* Local vars */
-static const char *dump_file = KA_TMP_DIR "/keepalived_bfd.data";
 
 /*
  *	bfd_t functions
@@ -81,6 +79,7 @@ alloc_bfd(const char *name)
 
 	/* Initialize internal variables */
 	bfd->fd_out = -1;
+	bfd->thread_open_fd_out = NULL;
 	bfd->thread_out = NULL;
 	bfd->thread_exp = NULL;
 	bfd->thread_rst = NULL;
@@ -161,6 +160,7 @@ dump_bfd(FILE *fp, const bfd_t *bfd)
 	/* If this is not at startup time, write some state variables */
 	if (fp) {
 		conf_write(fp, "   fd_out %d", bfd->fd_out);
+		conf_write(fp, "   thread_open_fd_out 0x%p", bfd->thread_open_fd_out);
 		conf_write(fp, "   thread_out 0x%p", bfd->thread_out);
 		conf_write_sands(fp, "sands_out", bfd->sands_out);
 		conf_write(fp, "   thread_exp 0x%p", bfd->thread_exp);
@@ -280,19 +280,27 @@ dump_bfd_data(FILE *fp, const bfd_data_t *data)
 	}
 }
 
+#ifndef _ONE_PROCESS_DEBUG_
+void
+dump_bfd_data_global(FILE *fp)
+{
+	dump_bfd_data(fp, bfd_data);
+}
+#endif
+
 void
 bfd_print_data(void)
 {
-	FILE *file = fopen_safe(dump_file, "w");
+	FILE *fp;
 
-	if (!file) {
-		log_message(LOG_INFO, "Can't open %s (%d: %m)", dump_file, errno);
+	fp = open_dump_file("keepalived_bfd.data");
+
+	if (!fp)
 		return;
-	}
 
-	dump_bfd_data(file, bfd_data);
+	dump_bfd_data(fp, bfd_data);
 
-	fclose(file);
+	fclose(fp);
 }
 
 void
@@ -344,7 +352,7 @@ free_bfd_buffer(void)
  * If local address is not set, then it is a configuration time check and
  * the bfd instance is configured without a local address. */
 bfd_t * __attribute__ ((pure))
-find_bfd_by_addr(const struct sockaddr_storage *nbr_addr, const struct sockaddr_storage *local_addr)
+find_bfd_by_addr(const sockaddr_t *nbr_addr, const sockaddr_t *local_addr)
 {
 	bfd_t *bfd;
 	assert(nbr_addr);

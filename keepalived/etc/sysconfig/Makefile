@@ -94,8 +94,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 subdir = keepalived/etc/sysconfig
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -170,6 +170,7 @@ CFLAGS = -g -O2
 CPP = gcc -E
 CPPFLAGS =   -D_GNU_SOURCE
 CYGPATH_W = echo
+DBUS_DATADIR = /usr/local/share
 DEFAULT_CONFIG_DIR = $(sysconfdir)/keepalived
 DEFAULT_CONFIG_FILE = $(sysconfdir)/keepalived/keepalived.conf
 DEFAULT_CONFIG_FILENAME = keepalived.conf
@@ -180,7 +181,7 @@ ECHO_N = -n
 ECHO_T = 
 EGREP = /bin/grep -E
 EXEEXT = 
-GENHASH_LIBS =  -lcrypto  -lssl 
+EXPANDED_DATADIR = /usr/local/share
 GREP = /bin/grep
 HAVE_RPM = No
 HAVE_RPMBUILD = 
@@ -190,7 +191,7 @@ INSTALL_DATA = ${INSTALL} -m 644
 INSTALL_PROGRAM = ${INSTALL}
 INSTALL_SCRIPT = ${INSTALL}
 INSTALL_STRIP_PROGRAM = $(install_sh) -c -s
-KA_CFLAGS = -g -g -O2 -Wall -Wextra -Wunused -Wstrict-prototypes -Wabsolute-value -Waddress-of-packed-member -Walloca -Walloc-zero -Warray-bounds=2 -Wattribute-alias -Wbad-function-cast -Wcast-align -Wcast-qual -Wdate-time -Wdisabled-optimization -Wdouble-promotion -Wduplicated-branches -Wduplicated-cond -Wfloat-conversion -Wfloat-equal -Wformat-overflow -Wformat-security -Wformat-signedness -Wformat-truncation -Wframe-larger-than=5120 -Wimplicit-fallthrough=3 -Winit-self -Winline -Wjump-misses-init -Wlogical-op -Wmissing-declarations -Wmissing-field-initializers -Wmissing-prototypes -Wnested-externs -Wnormalized -Wnull-dereference -Wold-style-definition -Woverlength-strings -Wpointer-arith -Wredundant-decls -Wshadow -Wshift-overflow=2 -Wstack-protector -Wstrict-overflow=4 -Wstrict-prototypes -Wstringop-overflow=2 -Wsuggest-attribute=cold -Wsuggest-attribute=const -Wsuggest-attribute=format -Wsuggest-attribute=malloc -Wsuggest-attribute=noreturn -Wsuggest-attribute=pure -Wsync-nand -Wtrampolines -Wundef -Wuninitialized -Wunknown-pragmas -Wunsuffixed-float-constants -Wunused-const-variable=2 -Wunused-macros -Wvariadic-macros -Wwrite-strings -fPIE -Wformat -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -grecord-gcc-switches -O2
+KA_CFLAGS = -g -g -O2 -Wall -Wextra -Wunused -Wstrict-prototypes -Wabsolute-value -Waddress-of-packed-member -Walloca -Walloc-zero -Warray-bounds=2 -Wattribute-alias=2 -Wbad-function-cast -Wc11-c2x-compat -Wcast-align -Wcast-qual -Wdate-time -Wdisabled-optimization -Wdouble-promotion -Wduplicated-branches -Wduplicated-cond -Wfloat-conversion -Wfloat-equal -Wformat-overflow -Wformat-security -Wformat-signedness -Wformat-truncation -Wframe-larger-than=5120 -Wimplicit-fallthrough=3 -Winit-self -Winline -Winvalid-pch -Wjump-misses-init -Wlogical-op -Wmissing-declarations -Wmissing-field-initializers -Wmissing-include-dirs -Wmissing-prototypes -Wnested-externs -Wnormalized -Wnull-dereference -Wold-style-definition -Woverlength-strings -Wpointer-arith -Wredundant-decls -Wshadow -Wshift-overflow=2 -Wstack-protector -Wstrict-overflow=4 -Wstringop-overflow=2 -Wstringop-truncation -Wsuggest-attribute=cold -Wsuggest-attribute=format -Wsuggest-attribute=malloc -Wsuggest-attribute=noreturn -Wsuggest-attribute=pure -Wsync-nand -Wtrampolines -Wundef -Wuninitialized -Wunknown-pragmas -Wunsafe-loop-optimizations -Wunsuffixed-float-constants -Wunused-const-variable=2 -Wvariadic-macros -Wwrite-strings -fPIE -Wformat -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -grecord-gcc-switches -O2
 KA_CPPFLAGS = -D_GNU_SOURCE -I/usr/include/libnl3
 KA_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now
 KA_LIBS = -lm -lcrypto -lssl -lnl-3 -lnl-genl-3 -lip4tc -lip6tc -lnftnl -lmnl -ldl
@@ -207,19 +208,21 @@ MAKEINFO = ${SHELL} /home/acassen/src/keepalived/build-aux/missing makeinfo
 MKDIR_P = /bin/mkdir -p
 NETSNMP_CONFIG = 
 OBJEXT = o
+OLD_DEFAULT_CONFIG_FILE = /etc/keepalived/keepalived.conf
 PACKAGE = keepalived
 PACKAGE_BUGREPORT = keepalived-users@groups.io
 PACKAGE_NAME = Keepalived
-PACKAGE_STRING = Keepalived 2.2.2
+PACKAGE_STRING = Keepalived 2.2.7
 PACKAGE_TARNAME = keepalived
 PACKAGE_URL = http://www.keepalived.org/
-PACKAGE_VERSION = 2.2.2
+PACKAGE_VERSION = 2.2.7
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
 PKG_CONFIG_PATH = 
 RANLIB = ranlib
-RUN_DIR_ROOT = 
+RUNSTATEDIR = /run
+SAMPLES_DIR = $(sysconfdir)/keepalived/samples
 SED = /bin/sed
 SET_MAKE = 
 SHELL = /bin/bash
@@ -228,7 +231,8 @@ SPHINXBUILDNAME = sphinx-build
 STRIP = strip
 SYSTEMD_EXEC_START_OPTIONS = 
 SYSTEMD_SERVICE_TYPE = forking
-VERSION = 2.2.2
+USE_LLD = 
+VERSION = 2.2.7
 abs_builddir = /home/acassen/src/keepalived/keepalived/etc/sysconfig
 abs_srcdir = /home/acassen/src/keepalived/keepalived/etc/sysconfig
 abs_top_builddir = /home/acassen/src/keepalived
@@ -275,7 +279,7 @@ top_build_prefix = ../../../
 top_builddir = ../../..
 top_srcdir = ../../..
 edit = echo "  EDIT     $@"; \
-	sed \
+	/bin/sed \
 	 -e 's|@KEEPALIVED_RUNTIME_OPTIONS[@]|$(KEEPALIVED_RUNTIME_OPTIONS)|g'
 
 EXTRA_DIST = keepalived.in

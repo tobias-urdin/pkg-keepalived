@@ -429,14 +429,22 @@ vrrp_end_handler(void)
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
 #ifdef _HAVE_VRRP_VMAC_
-	if (!list_empty(&vrrp->unicast_peer) && vrrp->vmac_flags) {
+	if (__test_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags) &&
+	    (__test_bit(VRRP_VMAC_BIT, &vrrp->flags)
+#ifdef _HAVE_VRRP_IPVLAN_
+	     || (__test_bit(VRRP_IPVLAN_BIT, &vrrp->flags))
+#endif
+							   )) {
 		if (!vrrp->ifp) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast peers and no interface - clearing use_vmac", vrrp->iname);
-			vrrp->vmac_flags = 0;
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): Cannot use VMAC/ipvlan with unicast and no interface - clearing use_vmac", vrrp->iname);
+			__clear_bit(VRRP_VMAC_BIT, &vrrp->flags);
+#ifdef _HAVE_VRRP_IPVLAN_
+			__clear_bit(VRRP_IPVLAN_BIT, &vrrp->flags);
+#endif
 			vrrp->vmac_ifname[0] = '\0';
-		} else if (!__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) {
+		} else if (!__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "(%s) unicast with use_vmac requires vmac_xmit_base - setting", vrrp->iname);
-			__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags);
+			__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags);
 		}
 	}
 #endif
@@ -446,9 +454,8 @@ vrrp_end_handler(void)
 		vrrp->ttl = 0;
 	}
 
-	if (!vrrp->ifp) {
-		vrrp->linkbeat_use_polling = false;
-	}
+	if (!vrrp->ifp)
+		__clear_bit(VRRP_FLAG_LINKBEAT_USE_POLLING, &vrrp->flags);
 }
 #ifdef _HAVE_VRRP_VMAC_
 /* The following function is copied from kernel net/core/dev.c */
@@ -477,32 +484,97 @@ vrrp_vmac_handler(const vector_t *strvec)
 	interface_t *ifp;
 	const char *name;
 	vrrp_t *ovrrp;
+	unsigned i;
+	unsigned j;
+	bool had_error;
+	unsigned long byte_val;
+	const char *p;
+	char *endptr;
 
-	__set_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags);
+	__set_bit(VRRP_VMAC_BIT, &vrrp->flags);
 
-	if (vector_size(strvec) >= 2) {
-		name = strvec_slot(strvec, 1);
-
-		if (!dev_name_valid(name)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "VMAC interface name '%s' too long or invalid characters - ignoring", name);
-			return;
-		}
-
-		/* Check another vrrp instance isn't using this name */
-		list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
-			if (!strcmp(name, ovrrp->vmac_ifname)) {
-				report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, name);
-				return;
+	/* Ifname and MAC address can be specified */
+	for (i = 1; i < vector_size(strvec) && i <= 2; i++) {
+		if (strchr(strvec_slot(strvec, i), ':')) {
+			/* It's a MAC address - interface names cannot include a ':' */
+			if (__test_bit(VRRP_VMAC_MAC_SPECIFIED, &vrrp->flags)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC interface address already specified");
+				continue;
 			}
-		}
+			p = strvec_slot(strvec, i);
+			if (p[strspn(p, "0123456789ABCDEFabcdef:")]) {
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC invalid MAC address %s", p);
+				continue;
+			}
 
-		strcpy(vrrp->vmac_ifname, name);
+			for (j = 0, had_error = false; j < ETH_ALEN; j++) {
+				errno = 0;
+				byte_val = strtoul(p, &endptr, 16);
+				if (errno || endptr - p > 2 || endptr == p) {
+					had_error = true;
+					break;
+				}
 
-		/* Check if the interface exists and is a macvlan we can use */
-		if ((ifp = if_get_by_ifname(vrrp->vmac_ifname, IF_NO_CREATE)) &&
-		    ifp->vmac_type != MACVLAN_MODE_PRIVATE) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s) interface %s already exists and is not a private macvlan; ignoring vmac if_name", vrrp->iname, vrrp->vmac_ifname);
-			vrrp->vmac_ifname[0] = '\0';
+				if (*endptr != ':' && (*endptr || j < ETH_ALEN - 2)) {
+					had_error = true;
+					break;
+				}
+				vrrp->ll_addr[j] = (u_char)byte_val;
+				if (j == ETH_ALEN - 2 &&
+				    (!*endptr || (*endptr == ':' && !*(endptr+1)))) {
+					__set_bit(VRRP_VMAC_MAC_USE_VRID, &vrrp->flags);
+					break;
+				}
+				p = endptr + 1;
+				if (!*p && j < ETH_ALEN - 1) {
+					/* Not enough octets specified */
+					had_error = true;
+					break;
+				}
+			}
+			if (had_error)
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC invalid MAC address %s - ignored", strvec_slot(strvec, i));
+			else if (vrrp->ll_addr[0] & 0x01)
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC MAC address is multicast %s - ignoring", strvec_slot(strvec, i));
+			else if (!memcmp(ll_addr, vrrp->ll_addr, ETH_ALEN - 2) && (vrrp->ll_addr[ETH_ALEN - 2] == 0x01 || vrrp->ll_addr[ETH_ALEN - 2] == 0x02))
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC MAC address not allowed to be RFC5798 address (%s) - ignoring", strvec_slot(strvec, i));
+			else
+				__set_bit(VRRP_VMAC_MAC_SPECIFIED, &vrrp->flags);
+		} else {
+			name = strvec_slot(strvec, i);
+
+			if (vrrp->vmac_ifname[0]) {
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC interface name already specified");
+				continue;
+			}
+
+			if (!dev_name_valid(name)) {
+				report_config_error(CONFIG_GENERAL_ERROR, "VMAC interface name '%s' too long or invalid characters - ignoring", name);
+				continue;
+			}
+
+			/* Check another vrrp instance isn't using this name */
+			list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
+				if (!strcmp(name, ovrrp->vmac_ifname)) {
+					report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, name);
+					name = NULL;
+					break;
+				}
+			}
+
+			if (!name)
+				continue;
+
+			strcpy(vrrp->vmac_ifname, name);
+
+			/* Check if the interface exists and is a macvlan we can use */
+			if ((ifp = if_get_by_ifname(vrrp->vmac_ifname, IF_NO_CREATE)) &&
+			    (ifp->if_type != IF_TYPE_MACVLAN ||
+			     ifp->vmac_type != MACVLAN_MODE_PRIVATE)) {
+				/* ??? also check ADDR_GEN_MODE and VRF enslavement matches parent */
+				report_config_error(CONFIG_GENERAL_ERROR, "(%s) interface %s already exists and is not a private macvlan; ignoring vmac if_name", vrrp->iname, vrrp->vmac_ifname);
+				vrrp->vmac_ifname[0] = '\0';
+			}
 		}
 	}
 }
@@ -512,14 +584,14 @@ vrrp_vmac_addr_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
-	__set_bit(VRRP_VMAC_ADDR_BIT, &vrrp->vmac_flags);
+	__set_bit(VRRP_VMAC_ADDR_BIT, &vrrp->flags);
 }
 static void
 vrrp_vmac_xmit_base_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
-	__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags);
+	__set_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->flags);
 }
 #endif
 #ifdef _HAVE_VRRP_IPVLAN_
@@ -534,12 +606,12 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 	size_t i;
 	const char *ifname;
 
-	if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags)) {
+	if (__test_bit(VRRP_IPVLAN_BIT, &vrrp->flags)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) use_ipvlan already specified", vrrp->iname);
 		return;
 	}
 
-	__set_bit(VRRP_IPVLAN_BIT, &vrrp->vmac_flags);
+	__set_bit(VRRP_IPVLAN_BIT, &vrrp->flags);
 
 	for (i = 1; i < vector_size(strvec); i++) {
 		if (!strcmp(strvec_slot(strvec, i), "bridge")) {
@@ -609,7 +681,7 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 					PTR_CAST(struct sockaddr_in, &vrrp->saddr)->sin_addr = vrrp->ipvlan_addr->u.sin.sin_addr;
 				else
 					PTR_CAST(struct sockaddr_in6, &vrrp->saddr)->sin6_addr = vrrp->ipvlan_addr->u.sin6_addr;
-				vrrp->saddr_from_config = true;
+				__set_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags);
 			}
 
 			continue;
@@ -630,13 +702,18 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 		list_for_each_entry(ovrrp, &vrrp_data->vrrp, e_list) {
 			if (!strcmp(ifname, ovrrp->vmac_ifname)) {
 				report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRRP instance %s is already using %s - ignoring name", vrrp->iname, ovrrp->iname, ifname);
-				continue;
+				ifname = NULL;
+				break;
 			}
 		}
 
+		if (!ifname)
+			continue;
+
 		strcpy(vrrp->vmac_ifname, ifname);
 
-		/* Check if the interface exists and is ipvlan we can use */
+		/* Check if the interface exists and is ipvlan we can use
+		   ??? also check ADDR_GEN_MODE and VRF enslavement matches parent */
 		if ((ifp = if_get_by_ifname(vrrp->vmac_ifname, IF_NO_CREATE)) &&
 		    (ifp->if_type != IF_TYPE_IPVLAN ||
 		     ifp->vmac_type != IPVLAN_MODE_L2)) {
@@ -649,20 +726,38 @@ vrrp_ipvlan_handler(const vector_t *strvec)
 static void
 vrrp_unicast_peer_handler(const vector_t *strvec)
 {
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	__set_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags);
+
 	alloc_value_block(alloc_vrrp_unicast_peer, strvec);
 }
+
+static void
+vrrp_unicast_fault_no_peer(__attribute__((unused)) const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	__set_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags);
+	__set_bit(VRRP_FLAG_UNICAST_FAULT_NO_PEERS, &vrrp->flags);
+}
+
 static void
 vrrp_check_unicast_src_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
-	vrrp->check_unicast_src = true;
+	__set_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags);
+
+	__set_bit(VRRP_FLAG_CHECK_UNICAST_SRC, &vrrp->flags);
 }
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 static void
 vrrp_unicast_chksum_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	__set_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags);
 
 	if (vector_size(strvec) >= 2) {
 		if (!strcmp(strvec_slot(strvec, 1), "never"))
@@ -730,13 +825,46 @@ vrrp_int_handler(const vector_t *strvec)
 	vrrp->configured_ifp = vrrp->ifp;
 #endif
 }
+
+#ifdef _HAVE_VRF_
+static void
+vrrp_vrf_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	const char *name = strvec_slot(strvec, 1);
+
+	if (strlen(name) >= IFNAMSIZ) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRF interface name '%s' too long - ignoring", vrrp->iname, name);
+		return;
+	}
+
+	if (vrrp->ifp) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) Cannot specify VRF interface and interface - ignoring", vrrp->iname);
+		return;
+	}
+
+	if (vrrp->vrf_ifp) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) VRF interface already specified as '%s' - ignoring", vrrp->iname, vrrp->vrf_ifp->ifname);
+		return;
+	}
+
+	vrrp->vrf_ifp = if_get_by_ifname(name, IF_CREATE_IF_DYNAMIC);
+	if (!vrrp->vrf_ifp)
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) WARNING - VRF interface %s doesn't exist", vrrp->iname, name);
+	else if (vrrp->vrf_ifp->hw_type == ARPHRD_LOOPBACK) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) cannot use a loopback interface (%s) for VRF - ignoring", vrrp->iname, name);
+		vrrp->vrf_ifp = NULL;
+	}
+}
+#endif
+
 #ifdef _WITH_LINKBEAT_
 static void
 vrrp_linkbeat_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
-	vrrp->linkbeat_use_polling = true;
+	__set_bit(VRRP_FLAG_LINKBEAT_USE_POLLING, &vrrp->flags);
 	report_config_error(CONFIG_GENERAL_ERROR, "(%s) 'linkbeat_use_polling' in vrrp instance deprecated - use linkbeat_interfaces block", vrrp->iname);
 }
 #endif
@@ -766,7 +894,7 @@ static void
 vrrp_dont_track_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	vrrp->dont_track_primary = true;
+	__set_bit(VRRP_FLAG_DONT_TRACK_PRIMARY, &vrrp->flags);
 }
 #ifdef _WITH_BFD_
 static void
@@ -779,7 +907,7 @@ static void
 vrrp_srcip_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	struct sockaddr_storage *saddr = &vrrp->saddr;
+	sockaddr_t *saddr = &vrrp->saddr;
 
 	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, saddr)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: VRRP instance[%s] malformed"
@@ -788,7 +916,7 @@ vrrp_srcip_handler(const vector_t *strvec)
 		return;
 	}
 
-	vrrp->saddr_from_config = true;
+	__set_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags);
 
 	if (vrrp->family == AF_UNSPEC)
 		vrrp->family = saddr->ss_family;
@@ -797,15 +925,55 @@ vrrp_srcip_handler(const vector_t *strvec)
 				     "[%s] MUST be of the same family !!! Skipping..."
 				   , vrrp->iname, strvec_slot(strvec, 1));
 		saddr->ss_family = AF_UNSPEC;
-		vrrp->saddr_from_config = false;
+		__clear_bit(VRRP_FLAG_SADDR_FROM_CONFIG, &vrrp->flags);
 	}
 }
+
+static void
+vrrp_unicast_srcip_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	__set_bit(VRRP_FLAG_UNICAST_CONFIGURED, &vrrp->flags);
+
+	vrrp_srcip_handler(strvec);
+}
+
+static void
+vrrp_mcast_dstip_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+
+	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, &vrrp->mcast_daddr)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) malformed"
+				     " mcast dest address %s. Skipping..."
+				   , vrrp->iname, strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (vrrp->family == AF_UNSPEC)
+		vrrp->family = vrrp->mcast_daddr.ss_family;
+	else if (vrrp->mcast_daddr.ss_family != vrrp->family) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) mcast dest address"
+				     " %s MUST match VRRP instance family. Skipping..."
+				   , vrrp->iname, strvec_slot(strvec, 1));
+		vrrp->mcast_daddr.ss_family = AF_UNSPEC;
+	}
+
+	if ((vrrp->mcast_daddr.ss_family == AF_INET && !IN_MULTICAST(htonl(PTR_CAST(struct sockaddr_in, &vrrp->mcast_daddr)->sin_addr.s_addr))) ||
+	    (vrrp->mcast_daddr.ss_family == AF_INET6 && !IN6_IS_ADDR_MC_LINKLOCAL(&PTR_CAST(struct sockaddr_in6, &vrrp->mcast_daddr)->sin6_addr))) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s) mcast_dst_ip %s not%s multicast. Skipping..."
+				   , vrrp->iname, strvec_slot(strvec, 1), vrrp->mcast_daddr.ss_family == AF_INET6 ? " link-local" : "");
+		vrrp->mcast_daddr.ss_family = AF_UNSPEC;
+	}
+}
+
 static void
 vrrp_track_srcip_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
-	vrrp->track_saddr = true;
+	__set_bit(VRRP_FLAG_TRACK_SADDR, &vrrp->flags);
 }
 static void
 vrrp_vrid_handler(const vector_t *strvec)
@@ -850,16 +1018,16 @@ static void
 vrrp_adv_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	double adver_int;
+	unsigned adver_int;
 	bool res;
 
-	res = read_double_strvec(strvec, 1, &adver_int, 0.01F, 255.0F, true);
+	res = read_decimal_unsigned_strvec(strvec, 1, &adver_int, TIMER_HZ / 100, 255 * TIMER_HZ, TIMER_HZ_DIGITS, true);
 
 	/* Simple check - just positive */
 	if (!res || adver_int <= 0)
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) Advert interval (%s) not valid! Must be > 0 - ignoring", vrrp->iname, strvec_slot(strvec, 1));
 	else
-		vrrp->adver_int = (unsigned)(adver_int * TIMER_HZ);
+		vrrp->adver_int = adver_int;
 }
 static void
 vrrp_debug_handler(const vector_t *strvec)
@@ -881,12 +1049,12 @@ vrrp_skip_check_adv_addr_handler(const vector_t *strvec)
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
 		if (res >= 0)
-			vrrp->skip_check_adv_addr = (bool)res;
+			__set_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &vrrp->flags);
 		else
 			report_config_error(CONFIG_GENERAL_ERROR, "(%s) invalid skip_check_adv_addr %s specified", vrrp->iname, strvec_slot(strvec, 1));
 	} else {
 		/* Defaults to true */
-		vrrp->skip_check_adv_addr = true;
+		__set_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &vrrp->flags);
 	}
 }
 static void
@@ -910,26 +1078,26 @@ static void
 vrrp_nopreempt_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	vrrp->nopreempt = 1;
+	__set_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags);
 }
 static void	/* backwards compatibility */
 vrrp_preempt_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	vrrp->nopreempt = 0;
+	__clear_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags);
 }
 static void
 vrrp_preempt_delay_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
-	double preempt_delay;
+	unsigned preempt_delay;
 
-	if (!read_double_strvec(strvec, 1, &preempt_delay, 0, TIMER_MAX_SEC, true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &preempt_delay, 0, TIMER_MAX_SEC * TIMER_HZ, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "(%s) Preempt_delay not valid! must be between 0-%u", vrrp->iname, TIMER_MAX_SEC);
 		vrrp->preempt_delay = 0;
 	}
 	else
-		vrrp->preempt_delay = (unsigned long)(preempt_delay * TIMER_HZ);
+		vrrp->preempt_delay = preempt_delay;
 }
 static void
 vrrp_notify_backup_handler(const vector_t *strvec)
@@ -1156,25 +1324,44 @@ vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 
 	vrrp->garp_lower_prio_rep = garp_lower_prio_rep;
 }
+static void
+vrrp_down_timer_adverts_handler(const vector_t *strvec)
+{
+	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
+	unsigned down_timer_adverts;
+
+	if (!read_unsigned_strvec(strvec, 1, &down_timer_adverts, 1, 100, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): Invalid down_timer_adverts [1:100] '%s'", vrrp->iname, strvec_slot(strvec, 1));
+		return;
+	}
+
+	vrrp->down_timer_adverts = down_timer_adverts;
+}
 #ifdef _HAVE_VRRP_VMAC_
 static void
-vrrp_vmac_garp_intvl_handler(const vector_t *strvec)
+vrrp_garp_extra_if_handler(const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 	unsigned delay = UINT_MAX;
 	unsigned index;
+	const char *cmd_name = strvec_slot(strvec, 0);
+
+	if (!strcmp(cmd_name, "vmac_garp_intvl")) {
+		/* Deprecated after v2.2.2 */
+		report_config_error(CONFIG_DEPRECATED, "Keyword \"vmac_garp_intvl\" is deprecated - please use \"garp_extra_if\"");
+	}
 
 	for (index = 1; index < vector_size(strvec); index++) {
 		if (!strcmp(strvec_slot(strvec, index), "all"))
-			vrrp->vmac_garp_all_if = true;
+			__set_bit(VRRP_FLAG_VMAC_GARP_ALL_IF, &vrrp->flags);
 		else if (!read_unsigned_strvec(strvec, index, &delay, 0, 86400, true)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "(%s): vmac_garp_intvl '%s' invalid - ignoring", vrrp->iname, strvec_slot(strvec, index));
+			report_config_error(CONFIG_GENERAL_ERROR, "(%s): %s '%s' invalid - ignoring", vrrp->iname, cmd_name, strvec_slot(strvec, index));
 			return;
 		}
 	}
 
 	if (delay == UINT_MAX) {
-		report_config_error(CONFIG_GENERAL_ERROR, "(%s): vmac_garp_intvl specified without time - ignoring", vrrp->iname);
+		report_config_error(CONFIG_GENERAL_ERROR, "(%s): %s specified without time - ignoring", vrrp->iname, cmd_name);
 		return;
 	}
 
@@ -1281,7 +1468,7 @@ vrrp_promote_secondaries_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	vrrp_t *vrrp = list_last_entry(&vrrp_data->vrrp, vrrp_t, e_list);
 
-	vrrp->promote_secondaries = true;
+	__set_bit(VRRP_FLAG_PROMOTE_SECONDARIES, &vrrp->flags);
 }
 static void
 vrrp_vroutes_handler(const vector_t *strvec)
@@ -1423,11 +1610,8 @@ vrrp_vscript_end_handler(void)
 							, vscript->sname);
 		remove_script = true;
 	}
-	else if (!remove_script) {
-		if (script_user_set)
-			return;
-
-		if (set_default_script_user(NULL, NULL)) {
+	else if (!remove_script && !script_user_set) {
+		if (get_default_script_user(&vscript->script.uid, &vscript->script.gid)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Unable to set default user for vrrp"
 								  " script %s - removing"
 								, vscript->sname);
@@ -1439,9 +1623,6 @@ vrrp_vscript_end_handler(void)
 		free_vscript(vscript);
 		return;
 	}
-
-	vscript->script.uid = default_script_uid;
-	vscript->script.gid = default_script_gid;
 }
 
 #ifdef _WITH_TRACK_PROCESS_
@@ -1592,9 +1773,9 @@ static void
 vrrp_tprocess_delay_general(const vector_t *strvec, enum process_delay delay_type)
 {
 	vrrp_tracked_process_t *tprocess = list_last_entry(&vrrp_data->vrrp_track_processes, vrrp_tracked_process_t, e_list);
-	double delay;
+	unsigned delay;
 
-	if (!read_double_strvec(strvec, 1, &delay, 0.000001F, 3600.F, true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &delay, 1, 3600U * TIMER_HZ, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%sdelay (%s) for vrrp_track_process %s must be between "
 							  "[0.000001..3600] inclusive. Ignoring..."
 							, delay_type == PROCESS_TERMINATE_DELAY ? "terminate_" :
@@ -1604,9 +1785,9 @@ vrrp_tprocess_delay_general(const vector_t *strvec, enum process_delay delay_typ
 	}
 
 	if (delay_type != PROCESS_FORK_DELAY)
-		tprocess->terminate_delay = (unsigned)(delay * TIMER_HZ);
+		tprocess->terminate_delay = delay;
 	if (delay_type != PROCESS_TERMINATE_DELAY)
-		tprocess->fork_delay = (unsigned)(delay * TIMER_HZ);
+		tprocess->fork_delay = delay;
 }
 static void
 vrrp_tprocess_terminate_delay_handler(const vector_t *strvec)
@@ -1714,15 +1895,15 @@ static void
 garp_group_garp_interval_handler(const vector_t *strvec)
 {
 	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
-	double val;
+	unsigned val;
 
-	if (!read_double_strvec(strvec, 1, &val, 0, (int)(INT_MAX / 1000000), true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &val, 0, INT_MAX, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "garp_group garp_interval '%s' invalid", strvec_slot(strvec, 1));
 		return;
 	}
 
-	delay->garp_interval.tv_sec = (time_t)val;
-	delay->garp_interval.tv_usec = (suseconds_t)((val - delay->garp_interval.tv_sec) * 1000000);
+	delay->garp_interval.tv_sec = (time_t)val / TIMER_HZ;
+	delay->garp_interval.tv_usec = (suseconds_t)(val % TIMER_HZ);
 	delay->have_garp_interval = true;
 
 	if (delay->garp_interval.tv_sec >= 1)
@@ -1732,15 +1913,15 @@ static void
 garp_group_gna_interval_handler(const vector_t *strvec)
 {
 	garp_delay_t *delay = list_last_entry(&garp_delay, garp_delay_t, e_list);
-	double val;
+	unsigned val;
 
-	if (!read_double_strvec(strvec, 1, &val, 0, (int)(INT_MAX / 1000000), true)) {
+	if (!read_decimal_unsigned_strvec(strvec, 1, &val, 0, INT_MAX, TIMER_HZ_DIGITS, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "garp_group gna_interval '%s' invalid", strvec_slot(strvec, 1));
 		return;
 	}
 
-	delay->gna_interval.tv_sec = (time_t)val;
-	delay->gna_interval.tv_usec = (suseconds_t)((val - delay->gna_interval.tv_sec) * 1000000);
+	delay->gna_interval.tv_sec = (time_t)val / TIMER_HZ;
+	delay->gna_interval.tv_usec = (suseconds_t)(val % TIMER_HZ);
 	delay->have_gna_interval = true;
 
 	if (delay->gna_interval.tv_sec >= 1)
@@ -1838,6 +2019,59 @@ garp_group_end_handler(void)
 	}
 }
 
+static void
+alloc_if_up_down_delay(const vector_t *strvec)
+{
+	unsigned down_delay = 0;
+	unsigned up_delay = 0;
+	int res;
+	unsigned long delay;
+	interface_t *ifp;
+
+	if (!(ifp = if_get_by_ifname(strvec_slot(strvec, 0), global_data->dynamic_interfaces))) {
+		report_config_error(CONFIG_FATAL, "unknown interface %s specified for up/down delay", strvec_slot(strvec, 0));
+		return;
+	}
+
+	if (vector_size(strvec) < 2) {
+		log_message(LOG_INFO, "No timeouts specified for %s up/down delays", ifp->ifname);
+		return;
+	}
+	if (vector_size(strvec) > 3)
+		log_message(LOG_INFO, "Too many parameters for %s up/down delays", ifp->ifname);
+
+	res = read_timer(strvec, 1, &delay, 0, 255 * TIMER_HZ, true);
+	if (!res) {
+		log_message(LOG_INFO, "Invalid down delay %s for %s", strvec_slot(strvec, 1), ifp->ifname);
+		return;
+	}
+	down_delay = (unsigned)delay;
+
+	if (vector_size(strvec) == 2)
+		up_delay = 0;
+	else {
+		res = read_timer(strvec, 2, &delay, 0, 255 * TIMER_HZ, true);
+		if (!res) {
+			log_message(LOG_INFO, "Invalid up delay %s for %s", strvec_slot(strvec, 2), ifp->ifname);
+			return;
+		}
+		up_delay = (unsigned)delay;
+	}
+
+	ifp->down_debounce_timer = down_delay;
+	ifp->up_debounce_timer = up_delay;
+}
+
+/* interface state change delays handler */
+static void
+interface_up_down_delays_handler(const vector_t *strvec)
+{
+	if (!strvec)
+		return;
+
+	alloc_value_block(alloc_if_up_down_delay, strvec);
+}
+
 void
 init_vrrp_keywords(bool active)
 {
@@ -1897,6 +2131,7 @@ init_vrrp_keywords(bool active)
 	install_keyword("use_ipvlan", &vrrp_ipvlan_handler);
 #endif
 	install_keyword("unicast_peer", &vrrp_unicast_peer_handler);
+	install_keyword("unicast_fault_no_peer", &vrrp_unicast_fault_no_peer);
 	install_keyword("check_unicast_src", &vrrp_check_unicast_src_handler);
 #ifdef _WITH_UNICAST_CHKSUM_COMPAT_
 	install_keyword("old_unicast_checksum", &vrrp_unicast_chksum_handler);
@@ -1904,6 +2139,9 @@ init_vrrp_keywords(bool active)
 	install_keyword("native_ipv6", &vrrp_native_ipv6_handler);
 	install_keyword("state", &vrrp_state_handler);
 	install_keyword("interface", &vrrp_int_handler);
+#ifdef _HAVE_VRF_
+	install_keyword("vrf", &vrrp_vrf_handler);
+#endif
 	install_keyword("dont_track_primary", &vrrp_dont_track_handler);
 	install_keyword("track_interface", &vrrp_track_if_handler);
 	install_keyword("track_script", &vrrp_track_scr_handler);
@@ -1915,7 +2153,8 @@ init_vrrp_keywords(bool active)
 	install_keyword("track_bfd", &vrrp_track_bfd_handler);
 #endif
 	install_keyword("mcast_src_ip", &vrrp_srcip_handler);
-	install_keyword("unicast_src_ip", &vrrp_srcip_handler);
+	install_keyword("unicast_src_ip", &vrrp_unicast_srcip_handler);
+	install_keyword("mcast_dst_ip", &vrrp_mcast_dstip_handler);
 	install_keyword("track_src_ip", &vrrp_track_srcip_handler);
 	install_keyword("virtual_router_id", &vrrp_vrid_handler);
 	install_keyword("unicast_ttl", &vrrp_ttl_handler);
@@ -1958,8 +2197,10 @@ init_vrrp_keywords(bool active)
 	install_keyword("garp_master_refresh_repeat", &vrrp_garp_refresh_rep_handler);
 	install_keyword("garp_lower_prio_delay", &vrrp_garp_lower_prio_delay_handler);
 	install_keyword("garp_lower_prio_repeat", &vrrp_garp_lower_prio_rep_handler);
+	install_keyword("down_timer_adverts", &vrrp_down_timer_adverts_handler);
 #ifdef _HAVE_VRRP_VMAC_
-	install_keyword("vmac_garp_intvl", &vrrp_vmac_garp_intvl_handler);
+	install_keyword("garp_extra_if", &vrrp_garp_extra_if_handler);
+	install_keyword("vmac_garp_intvl", &vrrp_garp_extra_if_handler);	/* Deprecated after v2.2.2 - incorrect keyword in commit 3dcd13c */
 #endif
 	install_keyword("lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
@@ -1997,6 +2238,9 @@ init_vrrp_keywords(bool active)
 	install_keyword("full_command", &vrrp_tprocess_full_handler);
 	install_sublevel_end_handler(&vrrp_tprocess_end_handler);
 #endif
+
+	/* Interface up down delays */
+	install_keyword_root("interface_up_down_delays", &interface_up_down_delays_handler, active);
 }
 
 const vector_t *

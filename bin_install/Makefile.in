@@ -93,8 +93,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 subdir = bin_install
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -140,6 +140,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -150,7 +151,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
-GENHASH_LIBS = @GENHASH_LIBS@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -177,6 +178,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -189,7 +191,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -198,6 +201,7 @@ SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
 SYSTEMD_EXEC_START_OPTIONS = @SYSTEMD_EXEC_START_OPTIONS@
 SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
+USE_LLD = @USE_LLD@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -351,6 +355,7 @@ maintainer-clean-generic:
 	@echo "This command is intended for maintainers to use"
 	@echo "it deletes files that may require special tools to rebuild."
 	-test -z "$(MAINTAINERCLEANFILES)" || rm -f $(MAINTAINERCLEANFILES)
+@WITH_IPVS_FALSE@uninstall-local:
 clean: clean-am
 
 clean-am: clean-generic clean-local mostlyclean-am
@@ -415,7 +420,7 @@ ps: ps-am
 
 ps-am:
 
-uninstall-am:
+uninstall-am: uninstall-local
 
 .MAKE: install-am install-strip
 
@@ -428,14 +433,14 @@ uninstall-am:
 	install-pdf-am install-ps install-ps-am install-strip \
 	installcheck installcheck-am installdirs maintainer-clean \
 	maintainer-clean-generic mostlyclean mostlyclean-generic pdf \
-	pdf-am ps ps-am tags-am uninstall uninstall-am
+	pdf-am ps ps-am tags-am uninstall uninstall-am uninstall-local
 
 .PRECIOUS: Makefile
 
 
 .PHONY:	all debug profile
 
-all debug profile: $(top_builddir)/bin/keepalived $(top_builddir)/bin/genhash
+all debug profile: $(top_builddir)/bin/keepalived
 
 $(top_builddir)/bin/keepalived: $(top_builddir)/keepalived/keepalived
 	@$(MKDIR_P) $(top_builddir)/bin
@@ -448,21 +453,19 @@ $(top_builddir)/bin/keepalived: $(top_builddir)/keepalived/keepalived
 	else \
 		rm -f $(top_builddir)/bin/keepalived; \
 	fi)
+@WITH_IPVS_TRUE@	@(if test -f $(top_builddir)/keepalived/keepalived; then \
+@WITH_IPVS_TRUE@		rm -f $(top_builddir)/bin/genhash; \
+@WITH_IPVS_TRUE@		$(LN_S) keepalived $(top_builddir)/bin/genhash; \
+@WITH_IPVS_TRUE@	else \
+@WITH_IPVS_TRUE@		rm -f $(top_builddir)/bin/genhash; \
+@WITH_IPVS_TRUE@	fi)
 
-$(top_builddir)/bin/genhash: $(top_builddir)/genhash/genhash
-	@$(MKDIR_P) $(top_builddir)/bin
-	@(if test -f $(top_builddir)/genhash/genhash; then \
-		if test -z "$(DEBUG_LDFLAGS)$(DEBUG_CFLAGS)$(DEBUG_CPPFLAGS)"; then \
-			@STRIP@ -o $(top_builddir)/bin/genhash $(top_builddir)/genhash/genhash; \
-		else \
-			cp -p $(top_builddir)/genhash/genhash $(top_builddir)/bin; \
-		fi; \
-	else \
-		rm -f $(top_builddir)/bin/genhash; \
-	fi)
+@WITH_IPVS_TRUE@uninstall-local:
+@WITH_IPVS_TRUE@	rm -f $(DESTDIR)$(bindir)/genhash
 
 clean-local:
-	rm -f $(top_builddir)/bin/keepalived $(top_builddir)/bin/genhash
+@WITH_IPVS_TRUE@	rm -f $(top_builddir)/bin/genhash
+	rm -f $(top_builddir)/bin/keepalived
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.

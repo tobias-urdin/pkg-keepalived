@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include <openssl/err.h>
+#include <openssl/md5.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,8 +36,8 @@
 #include <pcre2.h>
 #endif
 
-#include "check_http.h"
 #include "check_api.h"
+#include "check_http.h"
 #include "check_ssl.h"
 #include "bitops.h"
 #include "logger.h"
@@ -130,7 +131,14 @@ static const char *request_template_ipv6 =
 			"%s"
 			"Host: [%s]%s\r\n\r\n";
 
-static void http_connect_thread(thread_ref_t);
+/* Output delimiters */
+#define DELIM_BEGIN             "-----------------------["
+#define DELIM_END               "]-----------------------\n"
+#define HTTP_HEADER_HEXA        DELIM_BEGIN"    HTTP Header Buffer    "DELIM_END
+#define HTTP_HEADER_ASCII       DELIM_BEGIN" HTTP Header Ascii Buffer "DELIM_END
+#define HTML_HEADER_HEXA        DELIM_BEGIN"        HTML Buffer        "DELIM_END
+#define HTML_HASH               DELIM_BEGIN"    HTML hash resulting    "DELIM_END
+#define HTML_HASH_FINAL         DELIM_BEGIN" HTML hash final resulting "DELIM_END
 
 #ifdef _WITH_REGEX_CHECK_
 static void
@@ -299,7 +307,7 @@ free_http_request(request_t *req)
 	FREE(req);
 }
 
-static void
+void
 free_http_check(checker_t *checker)
 {
 	http_checker_t *http_get_chk = checker->data;
@@ -1076,6 +1084,11 @@ timeout_epilog(thread_ref_t thread, const char *debug_msg)
 
 	/* check if server is currently alive */
 	if (checker->is_up || !checker->has_run) {
+		if (((http_checker_t *)checker->data)->genhash_flags & GENHASH) {
+			printf("%s\n", debug_msg);
+			thread_add_terminate_event(thread->master);
+			return;
+		}
 		if (global_data->checker_log_all_failures || checker->log_all_failures)
 			log_message(LOG_INFO, "%s server %s."
 					    , debug_msg
@@ -1273,15 +1286,29 @@ check_regex(url_t *url, request_t *req)
 
 /* Handle response */
 void
-http_handle_response(thread_ref_t thread, unsigned char digest[MD5_DIGEST_LENGTH]
-		     , bool empty_buffer)
+http_handle_response(thread_ref_t thread, unsigned char digest[MD5_DIGEST_LENGTH],
+		     bool empty_buffer)
 {
 	checker_t *checker = THREAD_ARG(thread);
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
-	int r;
 	url_t *url = fetch_next_url(http_get_check);
 	const char *msg = "HTTP status code";
+	int r;
+
+	/* Genhash mode ? */
+	if (http_get_check->genhash_flags) {
+		if (empty_buffer) {
+			fprintf(stderr, "no data received from remote webserver\n");
+		} else {
+			for (r = 0; r < MD5_DIGEST_LENGTH; r++)
+				printf("%02x", digest[r]);
+			printf("\n");
+		}
+
+		thread_add_terminate_event(thread->master);
+		return;
+	}
 
 	/* First check if remote webserver returned data */
 	if (empty_buffer) {
@@ -1300,13 +1327,15 @@ http_handle_response(thread_ref_t thread, unsigned char digest[MD5_DIGEST_LENGTH
 	/* Report a length mismatch the first time we get the specific difference */
 	if (req->content_len != SIZE_MAX && req->content_len != req->rx_bytes) {
 		if (url->len_mismatch != (ssize_t)req->content_len - (ssize_t)req->rx_bytes) {
-			log_message(LOG_INFO, "http_check for RS %s VS %s url %s%s: content_length (%zu) does not match received bytes (%zu)",
-				    FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs), url->virtualhost ? url->virtualhost : "",
-				    url->path, req->content_len, req->rx_bytes);
+			log_message(LOG_INFO, "http_check for RS %s VS %s url %s%s:"
+					      " content_length (%zu) does not match received bytes (%zu)"
+					    , FMT_RS(checker->rs, checker->vs)
+					    , FMT_VS(checker->vs)
+					    , url->virtualhost ? url->virtualhost : ""
+					    , url->path, req->content_len, req->rx_bytes);
 			url->len_mismatch = (ssize_t)req->content_len - (ssize_t)req->rx_bytes;
 		}
-	}
-	else
+	} else
 		url->len_mismatch = 0;
 
 	/* Continue with MD5SUM */
@@ -1355,24 +1384,56 @@ http_handle_response(thread_ref_t thread, unsigned char digest[MD5_DIGEST_LENGTH
 	epilog(thread, REGISTER_CHECKER_NEW);
 }
 
+/* Dump HTTP header */
+static void
+http_dump_header(char *buffer, size_t size)
+{
+        dump_buffer(buffer, size, stdout, 0);
+        printf(HTTP_HEADER_ASCII);
+        printf("%.*s\n", (int)size, buffer);
+}
+
+void
+dump_digest(unsigned char *digest, unsigned len)
+{
+	printf("\n");
+	printf(HTML_HASH);
+	dump_buffer(PTR_CAST(char, digest), len, stdout, 0);
+
+	printf(HTML_HASH_FINAL);
+}
+
 /* Handle response stream performing MD5 updates */
 void
-http_process_response(request_t *req, size_t r, url_t *url)
+http_process_response(thread_ref_t thread, request_t *req, size_t r, url_t *url)
 {
 	size_t old_req_len = req->len;
+	checker_t *checker = THREAD_ARG(thread);
+	http_checker_t *http_get_check = CHECKER_ARG(checker);
 
 	req->len += r;
 	req->buffer[req->len] = '\0';	/* Terminate the received data since it is used as a string */
 
 	if (!req->extracted) {
+		if (http_get_check->genhash_flags & GENHASH_VERBOSE)
+			printf(HTTP_HEADER_HEXA);
 		if ((req->extracted = extract_html(req->buffer, req->len))) {
 			req->status_code = extract_status_code(req->buffer, req->len);
 			req->content_len = extract_content_length(req->buffer, req->len);
+
+			if (http_get_check->genhash_flags & GENHASH_VERBOSE)
+                                http_dump_header(req->buffer, req->extracted - req->buffer);
+
 			r = req->len - (size_t)(req->extracted - req->buffer);
 			if (r && url->digest) {
-				if (req->content_len == SIZE_MAX || req->content_len > req->rx_bytes)
-					MD5_Update(&req->context, req->extracted,
+				if (req->content_len == SIZE_MAX || req->content_len > req->rx_bytes) {
+					EVP_DigestUpdate(req->context, req->extracted,
 						   req->content_len == SIZE_MAX || req->content_len >= req->rx_bytes + r ? r : req->content_len - req->rx_bytes);
+					if (http_get_check->genhash_flags & GENHASH_VERBOSE) {
+						printf(HTML_HEADER_HEXA);
+						dump_buffer(req->extracted, req->content_len == SIZE_MAX || req->content_len >= req->rx_bytes + r ? r : req->content_len - req->rx_bytes, stdout, 0);
+					}
+				}
 			}
 
 			req->rx_bytes = r;
@@ -1384,8 +1445,10 @@ http_process_response(request_t *req, size_t r, url_t *url)
 	} else if (req->len) {
 		if (url->digest &&
 		    (req->content_len == SIZE_MAX || req->content_len > req->rx_bytes)) {
-			MD5_Update(&req->context, req->buffer + old_req_len,
+			EVP_DigestUpdate(req->context, req->buffer + old_req_len,
 				   req->content_len == SIZE_MAX || req->content_len >= req->rx_bytes + r ? r : req->content_len - req->rx_bytes);
+			if (http_get_check->genhash_flags & GENHASH_VERBOSE)
+				dump_buffer(req->buffer + old_req_len, req->content_len == SIZE_MAX || req->content_len >= req->rx_bytes + r ? r : req->content_len - req->rx_bytes, stdout, 0);
 		}
 
 		req->rx_bytes += req->len;
@@ -1424,14 +1487,20 @@ http_read_thread(thread_ref_t thread)
 				    , FMT_CHK(checker)
 				    , strerror(errno));
 		thread_add_read(thread->master, http_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 		return;
 	}
 
 	if (r <= 0) {	/* -1:error , 0:EOF */
 		/* All the HTTP stream has been parsed */
-		if (url->digest)
-			MD5_Final(digest, &req->context);
+		if (url->digest) {
+			EVP_DigestFinal_ex(req->context, digest, NULL);
+			EVP_MD_CTX_free(req->context);
+			req->context = NULL;
+			if (r == 0 && http_get_check->genhash_flags & GENHASH_VERBOSE)
+				dump_digest(digest, MD5_DIGEST_LENGTH);
+		} else
+			digest[0] = 0;
 
 		if (r == -1) {
 			/* We have encountered a real read error */
@@ -1441,17 +1510,18 @@ http_read_thread(thread_ref_t thread)
 
 		/* Handle response stream */
 		http_handle_response(thread, digest, !req->extracted);
-	} else {
-		/* Handle response stream */
-		http_process_response(req, (size_t)r, url);
-
-		/*
-		 * Register next http stream reader.
-		 * Register itself to not perturbe global I/O multiplexer.
-		 */
-		thread_add_read(thread->master, http_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+		return;
 	}
+
+	/* Handle response stream */
+	http_process_response(thread, req, (size_t)r, url);
+
+	/*
+	 * Register next http stream reader.
+	 * Register itself to not perturbe global I/O multiplexer.
+	 */
+	thread_add_read(thread->master, http_read_thread, checker,
+			thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 }
 
 /*
@@ -1485,16 +1555,18 @@ http_response_thread(thread_ref_t thread)
 	req->num_match_calls = 0;
 #endif
 #endif
-	if (url->digest)
-		MD5_Init(&req->context);
+	if (url->digest) {
+		req->context = EVP_MD_CTX_new();
+		EVP_DigestInit_ex(req->context, EVP_md5(), NULL);
+	}
 
 	/* Register asynchronous http/ssl read thread */
 	if (http_get_check->proto == PROTO_SSL)
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 	else
 		thread_add_read(thread->master, http_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 }
 
 /* remote Web server is connected, send it the get url query.  */
@@ -1504,7 +1576,7 @@ http_request_thread(thread_ref_t thread)
 	checker_t *checker = THREAD_ARG(thread);
 	http_checker_t *http_get_check = CHECKER_ARG(checker);
 	request_t *req = http_get_check->req;
-	struct sockaddr_storage *addr = &checker->co->dst;
+	sockaddr_t *addr = &checker->co->dst;
 	unsigned timeout = checker->co->connection_to;
 	const char *vhost;
 	const char *request_host;
@@ -1573,7 +1645,7 @@ http_request_thread(thread_ref_t thread)
 
 	/* Register read timeouted thread */
 	thread_add_read(thread->master, http_response_thread, checker,
-			thread->u.f.fd, timeout, true);
+			thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 	thread_del_write(thread);
 	return;
 }
@@ -1590,7 +1662,7 @@ http_check_thread(thread_ref_t thread)
 	int ssl_err = 0;
 	bool new_req = false;
 
-	status = tcp_socket_state(thread, http_check_thread);
+	status = tcp_socket_state(thread, http_check_thread, 0);
 	switch (status) {
 	case connect_error:
 		timeout_epilog(thread, "Error connecting");
@@ -1631,14 +1703,14 @@ http_check_thread(thread_ref_t thread)
 					thread_add_read(thread->master,
 							http_check_thread,
 							THREAD_ARG(thread),
-							thread->u.f.fd, timeout, true);
+							thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 					thread_del_write(thread);
 					break;
 				case SSL_ERROR_WANT_WRITE:
 					thread_add_write(thread->master,
 							 http_check_thread,
 							 THREAD_ARG(thread),
-							 thread->u.f.fd, timeout, true);
+							 thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 					thread_del_read(thread);
 					break;
 				default:
@@ -1662,7 +1734,7 @@ http_check_thread(thread_ref_t thread)
 			thread_add_write(thread->master,
 					 http_request_thread, checker,
 					 thread->u.f.fd,
-					 checker->co->connection_to, true);
+					 checker->co->connection_to, THREAD_DESTROY_CLOSE_FD);
 			thread_del_read(thread);
 		} else {
 #ifdef _CHECKER_DEBUG_
@@ -1680,7 +1752,7 @@ http_check_thread(thread_ref_t thread)
 	}
 }
 
-static void
+void
 http_connect_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
@@ -1719,15 +1791,14 @@ http_connect_thread(thread_ref_t thread)
 	status = tcp_bind_connect(fd, co);
 
 	/* handle tcp connection status & register check worker thread */
-	if(tcp_connection_state(fd, status, thread, http_check_thread,
-			co->connection_to)) {
+	if (tcp_connection_state(fd, status, thread, http_check_thread, co->connection_to, 0)) {
 		close(fd);
 		if (status == connect_fail) {
 			timeout_epilog(thread, "HTTP_CHECK - network unreachable");
 		} else {
 			log_message(LOG_INFO, "WEB socket bind failed. Rescheduling");
 			thread_add_timer(thread->master, http_connect_thread, checker,
-					checker->delay_loop);
+					 checker->delay_loop);
 		}
 	}
 }

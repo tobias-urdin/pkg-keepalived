@@ -54,6 +54,7 @@
 #include "libipvs.h"
 #endif
 #include "notify.h"
+#include "sockaddr.h"
 
 /* constants */
 #define DEFAULT_SMTP_CONNECTION_TIMEOUT (30 * TIMER_HZ)
@@ -106,7 +107,7 @@ typedef struct _data {
 #endif
 	const char			*router_id;
 	const char			*email_from;
-	struct sockaddr_storage		smtp_server;
+	sockaddr_t			smtp_server;
 	const char			*smtp_helo_name;
 	unsigned long			smtp_connection_to;
 	list_head_t			email;
@@ -124,6 +125,7 @@ typedef struct _data {
 	const char			*reload_file;
 #endif
 	const char 			*config_directory;
+	bool				data_use_instance;
 #ifdef _WITH_VRRP_
 	bool				dynamic_interfaces;
 	bool				allow_if_changes;
@@ -144,8 +146,8 @@ typedef struct _data {
 	int				max_auto_priority;
 	long				min_auto_priority_delay;
 #ifdef _WITH_VRRP_
-	struct sockaddr_in6		vrrp_mcast_group6 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
-	struct sockaddr_in		vrrp_mcast_group4 __attribute__((aligned(__alignof__(struct sockaddr_storage))));
+	struct sockaddr_in6		vrrp_mcast_group6 __attribute__((aligned(__alignof__(sockaddr_t))));
+	struct sockaddr_in		vrrp_mcast_group4 __attribute__((aligned(__alignof__(sockaddr_t))));
 	unsigned			vrrp_garp_delay;
 	timeval_t			vrrp_garp_refresh;
 	unsigned			vrrp_garp_rep;
@@ -154,6 +156,7 @@ typedef struct _data {
 	unsigned			vrrp_garp_lower_prio_rep;
 	unsigned			vrrp_garp_interval;
 	unsigned			vrrp_gna_interval;
+	unsigned			vrrp_down_timer_adverts;
 #ifdef _HAVE_VRRP_VMAC_
 	unsigned			vrrp_vmac_garp_intvl;
 	bool				vrrp_vmac_garp_all_if;
@@ -215,6 +218,7 @@ typedef struct _data {
 	notify_fifo_t			notify_fifo;
 #ifdef _WITH_VRRP_
 	notify_fifo_t			vrrp_notify_fifo;
+	bool				fifo_write_vrrp_states_on_reload;
 #endif
 #ifdef _WITH_LVS_
 	notify_fifo_t			lvs_notify_fifo;
@@ -286,6 +290,7 @@ extern void alloc_email(const char *);
 extern data_t *alloc_global_data(void);
 extern void init_global_data(data_t *, data_t *, bool);
 extern void free_global_data(data_t *);
+extern FILE *open_dump_file(const char *) __attribute__((malloc));
 extern void dump_global_data(FILE *, data_t *);
 
 #endif

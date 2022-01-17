@@ -1,11 +1,12 @@
 /*
- * Soft:        Perform a GET query to a remote HTTP/HTTPS server.
- *              Set a timer to compute global remote server response
- *              time.
+ * Soft:        Keepalived is a failover program for the LVS project
+ *              <www.linuxvirtualserver.org>. It monitor & manipulate
+ *              a loadbalanced server pool using multi-layer checks.
  *
- * Part:        ssl.c include file.
+ * Part:        check_genhash.c include file.
  *
  * Authors:     Alexandre Cassen, <acassen@linux-vs.org>
+ *              Jan Holmberg, <jan@artech.net>
  *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,19 +21,26 @@
  * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
-#ifndef _SSL_H
-#define _SSL_H
+#ifndef _CHECK_GENHASH_H
+#define _CHECK_GENHASH_H
 
-/* global includes */
-#include <openssl/ssl.h>
 #include <stdbool.h>
 
-#include "scheduler.h"
+/* options bits */
+enum genhash_option_bits {
+        GENHASH_SERVER_BIT,
+        GENHASH_PORT_BIT,
+        GENHASH_URL_BIT,
+        GENHASH_SSL_BIT,
+        GENHASH_SNI_BIT,
+        GENHASH_HASH_METHOD_BIT,
+        GENHASH_VHOST_BIT,
+        GENHASH_FWMARK_BIT,
+        GENHASH_PROTO_BIT,
+        GENHASH_TIMEOUT_BIT,
+};
 
-/* Prototypes */
-extern void init_ssl(void);
-extern bool ssl_connect(thread_ref_t);
-extern int ssl_send_request(SSL *, const char *, int);
-extern void ssl_read_thread(thread_ref_t);
+/* Define prototypes */
+extern void check_genhash(bool, int, char **);
 
 #endif

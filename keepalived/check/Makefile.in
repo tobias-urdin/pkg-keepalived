@@ -100,8 +100,8 @@ POST_UNINSTALL = :
 @WITH_BFD_TRUE@am__append_6 = check_bfd.c
 subdir = keepalived/check
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(am__DIST_COMMON)
@@ -120,7 +120,8 @@ libcheck_a_DEPENDENCIES = $(am__append_1) $(am__append_3) \
 	$(am__append_5)
 am_libcheck_a_OBJECTS = check_daemon.$(OBJEXT) check_data.$(OBJEXT) \
 	check_parser.$(OBJEXT) check_api.$(OBJEXT) check_tcp.$(OBJEXT) \
-	check_http.$(OBJEXT) check_ssl.$(OBJEXT) check_smtp.$(OBJEXT) \
+	check_http.$(OBJEXT) check_ssl.$(OBJEXT) \
+	check_genhash.$(OBJEXT) check_smtp.$(OBJEXT) \
 	check_misc.$(OBJEXT) check_dns.$(OBJEXT) check_print.$(OBJEXT) \
 	ipwrapper.$(OBJEXT) ipvswrapper.$(OBJEXT) libipvs.$(OBJEXT) \
 	check_udp.$(OBJEXT) check_ping.$(OBJEXT) check_file.$(OBJEXT)
@@ -145,14 +146,14 @@ am__maybe_remake_depfiles = depfiles
 am__depfiles_remade = ./$(DEPDIR)/check_api.Po \
 	./$(DEPDIR)/check_bfd.Po ./$(DEPDIR)/check_daemon.Po \
 	./$(DEPDIR)/check_data.Po ./$(DEPDIR)/check_dns.Po \
-	./$(DEPDIR)/check_file.Po ./$(DEPDIR)/check_http.Po \
-	./$(DEPDIR)/check_misc.Po ./$(DEPDIR)/check_nftables.Po \
-	./$(DEPDIR)/check_parser.Po ./$(DEPDIR)/check_ping.Po \
-	./$(DEPDIR)/check_print.Po ./$(DEPDIR)/check_smtp.Po \
-	./$(DEPDIR)/check_snmp.Po ./$(DEPDIR)/check_ssl.Po \
-	./$(DEPDIR)/check_tcp.Po ./$(DEPDIR)/check_udp.Po \
-	./$(DEPDIR)/ipvswrapper.Po ./$(DEPDIR)/ipwrapper.Po \
-	./$(DEPDIR)/libipvs.Po
+	./$(DEPDIR)/check_file.Po ./$(DEPDIR)/check_genhash.Po \
+	./$(DEPDIR)/check_http.Po ./$(DEPDIR)/check_misc.Po \
+	./$(DEPDIR)/check_nftables.Po ./$(DEPDIR)/check_parser.Po \
+	./$(DEPDIR)/check_ping.Po ./$(DEPDIR)/check_print.Po \
+	./$(DEPDIR)/check_smtp.Po ./$(DEPDIR)/check_snmp.Po \
+	./$(DEPDIR)/check_ssl.Po ./$(DEPDIR)/check_tcp.Po \
+	./$(DEPDIR)/check_udp.Po ./$(DEPDIR)/ipvswrapper.Po \
+	./$(DEPDIR)/ipwrapper.Po ./$(DEPDIR)/libipvs.Po
 am__mv = mv -f
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
 	$(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS)
@@ -211,6 +212,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -221,7 +223,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
-GENHASH_LIBS = @GENHASH_LIBS@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -248,6 +250,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -260,7 +263,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -269,6 +273,7 @@ SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
 SYSTEMD_EXEC_START_OPTIONS = @SYSTEMD_EXEC_START_OPTIONS@
 SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
+USE_LLD = @USE_LLD@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -324,7 +329,7 @@ AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 noinst_LIBRARIES = libcheck.a
 libcheck_a_SOURCES = \
 	check_daemon.c check_data.c check_parser.c \
-	check_api.c check_tcp.c check_http.c check_ssl.c \
+	check_api.c check_tcp.c check_http.c check_ssl.c check_genhash.c \
 	check_smtp.c check_misc.c check_dns.c check_print.c \
 	ipwrapper.c ipvswrapper.c libipvs.c check_udp.c check_ping.c \
 	check_file.c
@@ -386,6 +391,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_data.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_dns.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_file.Po@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_genhash.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_http.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_misc.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/check_nftables.Po@am__quote@ # am--include-marker
@@ -552,6 +558,7 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/check_data.Po
 	-rm -f ./$(DEPDIR)/check_dns.Po
 	-rm -f ./$(DEPDIR)/check_file.Po
+	-rm -f ./$(DEPDIR)/check_genhash.Po
 	-rm -f ./$(DEPDIR)/check_http.Po
 	-rm -f ./$(DEPDIR)/check_misc.Po
 	-rm -f ./$(DEPDIR)/check_nftables.Po
@@ -617,6 +624,7 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/check_data.Po
 	-rm -f ./$(DEPDIR)/check_dns.Po
 	-rm -f ./$(DEPDIR)/check_file.Po
+	-rm -f ./$(DEPDIR)/check_genhash.Po
 	-rm -f ./$(DEPDIR)/check_http.Po
 	-rm -f ./$(DEPDIR)/check_misc.Po
 	-rm -f ./$(DEPDIR)/check_nftables.Po

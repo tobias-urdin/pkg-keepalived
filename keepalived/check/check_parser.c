@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #include "check_parser.h"
 #include "check_data.h"
@@ -49,7 +50,7 @@
 
 /* List of valid schedulers */
 static const char *lvs_schedulers[] =
-	{"rr", "wrr", "lc", "wlc", "lblc", "sh", "mh", "dh", "fo", "ovf", "lblcr", "sed", "nq", NULL};
+	{"rr", "wrr", "lc", "wlc", "lblc", "sh", "mh", "dh", "fo", "ovf", "lblcr", "sed", "nq", "twos", NULL};
 
 /* SSL handlers */
 static void
@@ -508,7 +509,6 @@ static void
 pgr_handler(const vector_t *strvec)
 {
 	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
-	struct in_addr addr;
 	uint16_t af = vs->af;
 	unsigned granularity;
 
@@ -522,7 +522,10 @@ pgr_handler(const vector_t *strvec)
 		}
 		vs->persistence_granularity = granularity;
 	} else {
-		if (!inet_aton(strvec_slot(strvec, 1), &addr)) {
+		struct addrinfo hints = { .ai_flags = AI_NUMERICHOST, .ai_family = AF_INET };
+		struct addrinfo *res;
+
+		if (getaddrinfo(strvec_slot(strvec, 1), NULL, &hints, &res)) {
 			report_config_error(CONFIG_GENERAL_ERROR, "Invalid IPv4 persistence_granularity specified - %s", strvec_slot(strvec, 1));
 			return;
 		}
@@ -540,7 +543,13 @@ pgr_handler(const vector_t *strvec)
 		}
 #endif
 
-		vs->persistence_granularity = addr.s_addr;
+		/* Cast via void * to stop -Wcast-align warning.
+		 * Since alignment of struct addrinfo >= alignment of struct sockaddr_in and res->ai_addr is
+		 * aligned to a struct addrinfo, it is not a problem.
+		 *   e.g. vs->persistence_granularity = ((struct sockaddr_in *)((void *)res->ai_addr))->sin_addr.s_addr;
+		 */
+		vs->persistence_granularity = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+		freeaddrinfo(res);
 	}
 
 	if (vs->af == AF_UNSPEC)
@@ -600,6 +609,21 @@ vs_virtualhost_handler(const vector_t *strvec)
 
 	vs->virtualhost = set_value(strvec);
 }
+
+#ifdef _WITH_SNMP_CHECKER_
+static void
+vs_snmp_name_handler(const vector_t *strvec)
+{
+	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
+
+	if (vector_size(strvec) != 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "virtual server snmp_name missing or extra parameters");
+		return;
+	}
+
+	vs->snmp_name = set_value(strvec);
+}
+#endif
 
 /* Sorry Servers handlers */
 static void
@@ -869,6 +893,23 @@ rs_virtualhost_handler(const vector_t *strvec)
 
 	rs->virtualhost = set_value(strvec);
 }
+
+#ifdef _WITH_SNMP_CHECKER_
+static void
+rs_snmp_name_handler(const vector_t *strvec)
+{
+	virtual_server_t *vs = list_last_entry(&check_data->vs, virtual_server_t, e_list);
+	real_server_t *rs = list_last_entry(&vs->rs, real_server_t, e_list);
+
+	if (vector_size(strvec) != 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "real server snmp_name missing or extra parameters");
+		return;
+	}
+
+	rs->snmp_name = set_value(strvec);
+}
+#endif
+
 static void
 vs_alpha_handler(__attribute__((unused)) const vector_t *strvec)
 {
@@ -984,6 +1025,9 @@ init_check_keywords(bool active)
 	install_keyword("ha_suspend", &hasuspend_handler);
 	install_keyword("smtp_alert", &vs_smtp_alert_handler);
 	install_keyword("virtualhost", &vs_virtualhost_handler);
+#ifdef _WITH_SNMP_CHECKER_
+	install_keyword("snmp_name", &vs_snmp_name_handler);
+#endif
 
 	/* Pool regression detection and handling. */
 	install_keyword("alpha", &vs_alpha_handler);
@@ -1015,6 +1059,9 @@ init_check_keywords(bool active)
 	install_keyword("delay_loop", &rs_delay_handler);
 	install_keyword("smtp_alert", &rs_smtp_alert_handler);
 	install_keyword("virtualhost", &rs_virtualhost_handler);
+#ifdef _WITH_SNMP_CHECKER_
+	install_keyword("snmp_name", &rs_snmp_name_handler);
+#endif
 
 	install_sublevel_end_handler(&rs_end_handler);
 

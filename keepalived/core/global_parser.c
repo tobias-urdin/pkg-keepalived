@@ -35,6 +35,7 @@
 #include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #ifdef _WITH_SNMP_
 #include "snmp.h"
@@ -284,6 +285,11 @@ startup_shutdown_script(const vector_t *strvec, notify_script_t **script, bool s
 {
 	const char *type = startup ? "startup" : "shutdown";
 
+#ifndef _ONE_PROCESS_DEBUG_
+	if (prog_type != PROG_TYPE_PARENT)
+		return;
+#endif
+
 	if (*script) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%s script already specified", type);
 		return;
@@ -314,6 +320,11 @@ startup_shutdown_script_timeout_handler(const vector_t *strvec, bool startup)
 	const char *type = startup ? "startup" : "shutdown";
 	unsigned delay;
 
+#ifndef _ONE_PROCESS_DEBUG_
+	if (prog_type != PROG_TYPE_PARENT)
+		return;
+#endif
+
 	if (vector_size(strvec) < 2) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%s_script_timeout requires value", type);
 		return;
@@ -332,12 +343,14 @@ startup_shutdown_script_timeout_handler(const vector_t *strvec, bool startup)
 static void
 startup_script_handler(const vector_t *strvec)
 {
+	/* Only applicable for the parent process */
 	startup_shutdown_script(strvec, &global_data->startup_script, true);
 }
 
 static void
 startup_script_timeout_handler(const vector_t *strvec)
 {
+	/* Only applicable for the parent process */
 	startup_shutdown_script_timeout_handler(strvec, true);
 }
 
@@ -768,20 +781,59 @@ get_priority(const vector_t *strvec, const char *process)
 static void
 vrrp_mcast_group4_handler(const vector_t *strvec)
 {
-	struct sockaddr_in *mcast = &global_data->vrrp_mcast_group4;
+	sockaddr_t mcast = { .ss_family = AF_UNSPEC };
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, PTR_CAST(struct sockaddr_storage, mcast)))
-		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: Cant parse vrrp_mcast_group4 [%s]. Skipping"
+	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &mcast)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Can't parse vrrp_mcast_group4 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (mcast.ss_family != AF_INET) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group4 [%s] is not IPv4. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* Check the address is multicast */
+	if (!IN_MULTICAST(htonl(PTR_CAST(struct sockaddr_in, &mcast)->sin_addr.s_addr))) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group4 [%s] is not multicast. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	global_data->vrrp_mcast_group4 = *PTR_CAST(struct sockaddr_in, &mcast);
 }
 static void
 vrrp_mcast_group6_handler(const vector_t *strvec)
 {
-	struct sockaddr_in6 *mcast = &global_data->vrrp_mcast_group6;
+	sockaddr_t mcast = { .ss_family = AF_UNSPEC };
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, PTR_CAST(struct sockaddr_storage, mcast)))
-		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: Cant parse vrrp_mcast_group6 [%s]. Skipping"
+	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &mcast)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Can't parse vrrp_mcast_group6 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (mcast.ss_family != AF_INET6) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group6 [%s] is not IPv6. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* Check the address is multicast */
+	if (!IN6_IS_ADDR_MULTICAST(&PTR_CAST(struct sockaddr_in6, &mcast)->sin6_addr)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_mcast_group6 [%s] is not multicast. Skipping"
+				   , strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* An IPv6 multicast address should be link local */
+	if (!IN6_IS_ADDR_MC_LINKLOCAL(&PTR_CAST(struct sockaddr_in6, &mcast)->sin6_addr))
+		report_config_error(CONFIG_WARNING, "vrrp_mcast_group6 [%s] should be link-local multicast."
+				   , strvec_slot(strvec, 1));
+
+	global_data->vrrp_mcast_group6 = *PTR_CAST(struct sockaddr_in6, &mcast);
 }
 static void
 vrrp_garp_delay_handler(const vector_t *strvec)
@@ -874,14 +926,26 @@ vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 	global_data->vrrp_garp_lower_prio_rep = garp_lower_prio_rep;
 }
 static void
+vrrp_down_timer_adverts_handler(const vector_t *strvec)
+{
+	unsigned down_timer_adverts;
+
+	if (!read_unsigned_strvec(strvec, 1, &down_timer_adverts, 1, 100, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid vrrp_down_timer_adverts [1:100] '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+
+	global_data->vrrp_down_timer_adverts = down_timer_adverts;
+}
+static void
 vrrp_garp_interval_handler(const vector_t *strvec)
 {
-	double interval;
+	unsigned interval;
 
-	if (!read_double_strvec(strvec, 1, &interval, 1.0F / TIMER_HZ, (unsigned)(UINT_MAX / TIMER_HZ), true))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &interval, 1, UINT_MAX, TIMER_HZ_DIGITS, true))
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_interval '%s' is invalid", strvec_slot(strvec, 1));
 	else
-		global_data->vrrp_garp_interval = (unsigned)(interval * TIMER_HZ);
+		global_data->vrrp_garp_interval = interval;
 
 	if (global_data->vrrp_garp_interval >= 1 * TIMER_HZ)
 		log_message(LOG_INFO, "The vrrp_garp_interval is very large - %s seconds", strvec_slot(strvec, 1));
@@ -889,12 +953,12 @@ vrrp_garp_interval_handler(const vector_t *strvec)
 static void
 vrrp_gna_interval_handler(const vector_t *strvec)
 {
-	double interval;
+	unsigned interval;
 
-	if (!read_double_strvec(strvec, 1, &interval, 1.0F / TIMER_HZ, (unsigned)(UINT_MAX / TIMER_HZ), true))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &interval, 1, UINT_MAX, TIMER_HZ_DIGITS, true))
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_gna_interval '%s' is invalid", strvec_slot(strvec, 1));
 	else
-		global_data->vrrp_gna_interval = (unsigned)(interval * TIMER_HZ);
+		global_data->vrrp_gna_interval = interval;
 
 	if (global_data->vrrp_gna_interval >= 1 * TIMER_HZ)
 		log_message(LOG_INFO, "The vrrp_gna_interval is very large - %s seconds", strvec_slot(strvec, 1));
@@ -928,22 +992,28 @@ vrrp_min_garp_handler(const vector_t *strvec)
 }
 #ifdef _HAVE_VRRP_VMAC_
 static void
-vrrp_vmac_garp_intvl_handler(const vector_t *strvec)
+vrrp_vmac_garp_extra_if_handler(const vector_t *strvec)
 {
 	unsigned delay = 0;
 	unsigned index;
+	const char *cmd_name = strvec_slot(strvec, 0);
+
+	if (!strcmp(cmd_name, "vrrp_vmac_garp_intvl")) {
+		/* Deprecated after v2.2.2 */
+		report_config_error(CONFIG_DEPRECATED, "Keyword \"vrrp_vmac_garp_intvl\" is deprecated - please use \"vrrp_garp_extra_if\"");
+	}
 
 	for (index = 1; index < vector_size(strvec); index++) {
 		if (!strcmp(strvec_slot(strvec, index), "all"))
 			global_data->vrrp_vmac_garp_all_if = true;
 		else if (!read_unsigned_strvec(strvec, index, &delay, 1, 86400, true)) {
-			report_config_error(CONFIG_GENERAL_ERROR, "vrrp_vmac_garp_intvl '%s' invalid - ignoring", strvec_slot(strvec, index));
+			report_config_error(CONFIG_GENERAL_ERROR, "%s '%s' invalid - ignoring", cmd_name, strvec_slot(strvec, index));
 			return;
 		}
 	}
 
 	if (!delay) {
-		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_vmac_garp_intvl specified without time - ignoring");
+		report_config_error(CONFIG_GENERAL_ERROR, "%s specified without time - ignoring", cmd_name);
 		return;
 	}
 
@@ -1282,15 +1352,9 @@ notify_fifo(const vector_t *strvec, const char *type, notify_fifo_t *fifo)
 			log_message(LOG_INFO, "Invalid user/group for %s fifo %s - ignoring", type, fifo->name);
 			return;
 		}
-	}
-	else {
-		if (set_default_script_user(NULL, NULL)) {
-			log_message(LOG_INFO, "Failed to set default user for %s fifo %s - ignoring", type, fifo->name);
-			return;
-		}
-
-		fifo->uid = default_script_uid;
-		fifo->gid = default_script_gid;
+	} else if (get_default_script_user(&fifo->uid, &fifo->gid)) {
+		log_message(LOG_INFO, "Failed to set default user for %s fifo %s - ignoring", type, fifo->name);
+		return;
 	}
 
 	fifo->name = STRDUP(strvec_slot(strvec, 1));
@@ -1352,6 +1416,11 @@ vrrp_notify_priority_changes(const vector_t *strvec)
 	}
 
 	global_data->vrrp_notify_priority_changes = res;
+}
+static void
+fifo_write_vrrp_states_on_reload(__attribute__((unused))const vector_t *strvec)
+{
+	global_data->fifo_write_vrrp_states_on_reload = true;
 }
 #endif
 #ifdef _WITH_LVS_
@@ -2002,12 +2071,12 @@ umask_handler(const vector_t *strvec)
 static void
 vrrp_startup_delay_handler(const vector_t *strvec)
 {
-	double startup_delay;
+	unsigned startup_delay;
 
-	if (!read_double_strvec(strvec, 1, &startup_delay, 0.001F / TIMER_HZ, (unsigned)(UINT_MAX / TIMER_HZ), true))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &startup_delay, TIMER_HZ / 1000, UINT_MAX, TIMER_HZ_DIGITS, true))
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_startup_delay '%s' is invalid", strvec_slot(strvec, 1));
 	else
-		global_data->vrrp_startup_delay = (unsigned)(startup_delay * TIMER_HZ);
+		global_data->vrrp_startup_delay = startup_delay;
 
 	if (global_data->vrrp_startup_delay >= 60 * TIMER_HZ)
 		log_message(LOG_INFO, "The vrrp_startup_delay is very large - %s seconds", strvec_slot(strvec, 1));
@@ -2062,6 +2131,61 @@ static void
 include_check_handler(const vector_t *strvec)
 {
 	include_check_set(strvec);
+}
+
+static const char *
+set_dir(const char *dir_name)
+{
+	char *save_dir = STRDUP(dir_name);
+	size_t end;
+
+	/* Remove a trailing / */
+	end = strlen(save_dir);
+	if (end && save_dir[end-1] == '/')
+		save_dir[end-1] = '\0';
+
+	return save_dir;
+}
+
+static void
+config_save_dir_handler(const vector_t *strvec)
+{
+	struct stat statbuf;
+	const char *dir_name = strvec_slot(strvec, 1);
+	int ret;
+
+	/* We are checking the specified path is a directory on a best
+	 * efforts basis; we don't have a problem if we later try
+	 * creating a file in the directory and that fails. */
+	/* coverity[fs_check_call] */
+	ret = stat(dir_name, &statbuf);
+
+	if (!ret && statbuf.st_mode & S_IFDIR) {
+		/* dir_name exists and is a directory */
+		config_save_dir = set_dir(dir_name);
+
+		return;
+	}
+
+	if (prog_type != PROG_TYPE_PARENT) {
+		/* If we are not the parent, then the directory should exist */
+		if (ret)
+			report_config_error(CONFIG_GENERAL_ERROR, "Unable to find config_save_dir %s", dir_name);
+		else
+			report_config_error(CONFIG_GENERAL_ERROR, "config_save_dir %s is not a directory", dir_name);
+		return;
+	}
+
+	if (ret && errno == ENOENT) {
+		/* No matching entry exists - create the directory */
+		if (!mkdir(dir_name, S_IRWXU))
+			config_save_dir = set_dir(dir_name);
+		else 
+			report_config_error(CONFIG_GENERAL_ERROR, "Unable to create config_save_dir %s (error %d - %m)", dir_name, errno); 
+	} else if (ret)
+		report_config_error(CONFIG_GENERAL_ERROR, "config_save_dir %s error %d - %m", dir_name, errno);
+	else
+		report_config_error(CONFIG_GENERAL_ERROR, "config_save_dir %s exists and is not a directory", dir_name);
 }
 
 static void
@@ -2123,6 +2247,21 @@ config_copy_directory_handler(const vector_t *strvec)
 		report_config_error(CONFIG_GENERAL_ERROR, "%s missing directory name", strvec_slot(strvec, 0));
 }
 
+static void
+data_use_instance_handler(const vector_t *strvec)
+{
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0) {
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid value '%s' for global date_use_instance specified", strvec_slot(strvec, 1));
+			return;
+		}
+	}
+
+	global_data->data_use_instance = res;
+}
 void
 init_global_keywords(bool global_active)
 {
@@ -2193,11 +2332,13 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_garp_master_refresh_repeat", &vrrp_garp_refresh_rep_handler);
 	install_keyword("vrrp_garp_lower_prio_delay", &vrrp_garp_lower_prio_delay_handler);
 	install_keyword("vrrp_garp_lower_prio_repeat", &vrrp_garp_lower_prio_rep_handler);
+	install_keyword("vrrp_down_timer_adverts", &vrrp_down_timer_adverts_handler);
 	install_keyword("vrrp_garp_interval", &vrrp_garp_interval_handler);
 	install_keyword("vrrp_gna_interval", &vrrp_gna_interval_handler);
 	install_keyword("vrrp_min_garp", &vrrp_min_garp_handler);
 #ifdef _HAVE_VRRP_VMAC_
-	install_keyword("vrrp_vmac_garp_intvl", &vrrp_vmac_garp_intvl_handler);
+	install_keyword("vrrp_garp_extra_if", &vrrp_vmac_garp_extra_if_handler);
+	install_keyword("vrrp_vmac_garp_intvl", &vrrp_vmac_garp_extra_if_handler);	/* Deprecated after v2.2.2 - incorrect keyword in commit 3dcd13c */
 #endif
 	install_keyword("vrrp_lower_prio_no_advert", &vrrp_lower_prio_no_advert_handler);
 	install_keyword("vrrp_higher_prio_send_advert", &vrrp_higher_prio_send_advert_handler);
@@ -2240,6 +2381,7 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_notify_fifo", &vrrp_notify_fifo);
 	install_keyword("vrrp_notify_fifo_script", &vrrp_notify_fifo_script);
 	install_keyword("vrrp_notify_priority_changes", &vrrp_notify_priority_changes);
+	install_keyword("fifo_write_vrrp_states_on_reload", &fifo_write_vrrp_states_on_reload);
 #endif
 #ifdef _WITH_LVS_
 	install_keyword("lvs_notify_fifo", &lvs_notify_fifo);
@@ -2323,6 +2465,8 @@ init_global_keywords(bool global_active)
 	install_keyword("reload_repeat", &reload_repeat_handler);
 	install_keyword("reload_file", &reload_file_handler);
 	install_keyword("include_check", &include_check_handler);
+	install_keyword("config_save_dir", &config_save_dir_handler);
 #endif
 	install_keyword("tmp_config_directory", &config_copy_directory_handler);
+	install_keyword("data_use_instance", &data_use_instance_handler);
 }

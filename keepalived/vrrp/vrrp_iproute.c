@@ -281,6 +281,7 @@ add_nexthops(ip_route_t *route, struct nlmsghdr *nlh, struct rtmsg *rtm)
 		rtnh->rtnh_len = sizeof(*rtnh);
 		rta->rta_len = (unsigned short)(rta->rta_len + rtnh->rtnh_len);
 		add_nexthop(nh, rtm, rta, sizeof(buf), rtnh);
+		/* See -Wcast-align comment in keepalived_netlink.c, also applies to RTNH_NEXT */
 		rtnh = RTNH_NEXT(rtnh);
 	}
 
@@ -288,7 +289,10 @@ add_nexthops(ip_route_t *route, struct nlmsghdr *nlh, struct rtmsg *rtm)
 		addattr_l(nlh, sizeof(buf), RTA_MULTIPATH, RTA_DATA(rta), RTA_PAYLOAD(rta));
 }
 
-/* Add/Delete IP route to/from a specific interface */
+/* Add/Delete IP route to/from a specific interface.
+ * Note: By default we do not set the NLM_F_EXCL flag, and so the
+ * equivalent ip route command to add a route is: ip route prepend ...
+ */
 static bool
 netlink_route(ip_route_t *iproute, int cmd)
 {
@@ -311,6 +315,10 @@ netlink_route(ip_route_t *iproute, int cmd)
 		req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE;
 		if (cmd == IPROUTE_REPLACE)
 			req.n.nlmsg_flags |= NLM_F_REPLACE;
+		else if (iproute->mask & IPROUTE_BIT_ADD)
+			req.n.nlmsg_flags |= NLM_F_EXCL;
+		else if (iproute->mask & IPROUTE_BIT_APPEND)
+			req.n.nlmsg_flags |= NLM_F_APPEND;
 		req.n.nlmsg_type  = RTM_NEWROUTE;
 	}
 
@@ -682,6 +690,10 @@ format_iproute(const ip_route_t *route, char *buf, size_t buf_len)
 
 	/* The do {...} while(false) loop is so that we can break out of the loop if the buffer is filled */
 	do {
+		if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s ", 
+						route->mask & IPROUTE_BIT_ADD ? "add" :
+						route->mask & IPROUTE_BIT_APPEND ? "append" : "prepend")) >= buf_end - 1)
+			break;
 		if (route->type != RTN_UNICAST)
 			if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%s ", get_rttables_rtntype(route->type))) >= buf_end - 1)
 				break;
@@ -778,7 +790,7 @@ format_iproute(const ip_route_t *route, char *buf, size_t buf_len)
 				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rtt / (double)8000.0F)) >= buf_end - 1)
 					break;
 			} else {
-				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rtt / 8)) >= buf_end - 1)
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gms", route->rtt / (double)8.F)) >= buf_end - 1)
 					break;
 			}
 		}
@@ -790,7 +802,7 @@ format_iproute(const ip_route_t *route, char *buf, size_t buf_len)
 				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gs", route->rttvar / (double)4000.0F)) >= buf_end - 1)
 					break;
 			} else {
-				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%ums", route->rttvar / 4)) >= buf_end - 1)
+				if ((op += (size_t)snprintf(op, (size_t)(buf_end - op), "%gms", route->rttvar / (double)4.F)) >= buf_end - 1)
 					break;
 			}
 		}
@@ -1353,7 +1365,6 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 	uint8_t val8;
 	unsigned int i = 0;
 	bool do_nexthop = false;
-	bool raw;
 	uint8_t family;
 	const char *dest = NULL;
 
@@ -1580,13 +1591,10 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 				new->lock |= 1 << RTAX_RTT;
 				i++;
 			}
-			if (get_time_rtt(&new->rtt, strvec_slot(strvec, i), &raw) ||
-			    (!raw && new->rtt >= UINT32_MAX / 8)) {
+			if (get_time_rtt(&new->rtt, strvec_slot(strvec, i), 8)) { /* Units are 1/8000 second */
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rtt %s for route", strvec_slot(strvec,i));
 				goto err;
 			}
-			if (raw)
-				new->rtt *= 8;
 			new->mask |= IPROUTE_BIT_RTT;
 		}
 		else if (!strcmp(str, "rttvar")) {
@@ -1594,13 +1602,10 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 				new->lock |= 1 << RTAX_RTTVAR;
 				i++;
 			}
-			if (get_time_rtt(&new->rttvar, strvec_slot(strvec, i), &raw) ||
-			    (!raw && new->rttvar >= UINT32_MAX / 4)) {
+			if (get_time_rtt(&new->rttvar, strvec_slot(strvec, i), 4)) { /* Units are 1/4000 second */
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rttvar %s for route", strvec_slot(strvec,i));
 				goto err;
 			}
-			if (raw)
-				new->rttvar *= 4;
 			new->mask |= IPROUTE_BIT_RTTVAR;
 		}
 		else if (!strcmp(str, "reordering")) {
@@ -1651,7 +1656,7 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 				new->lock |= 1 << RTAX_RTO_MIN;
 				i++;
 			}
-			if (get_time_rtt(&new->rto_min, strvec_slot(strvec, i), &raw)) {
+			if (get_time_rtt(&new->rto_min, strvec_slot(strvec, i), 1)) { /* Units are 1/1000 second */
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid rto_min value %s specified for route", strvec_slot(strvec, i));
 				goto err;
 			}
@@ -1749,6 +1754,19 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 			report_config_error(CONFIG_GENERAL_ERROR, "%s not supported by kernel", "fastopen_no_cookie");
 #endif
 		}
+		else if (!strcmp(str, "add")) {
+			/* This is the default for iproute2 */
+			new->mask |= IPROUTE_BIT_ADD;
+			new->mask &= ~IPROUTE_BIT_APPEND;
+		}
+		else if (!strcmp(str, "prepend")) {
+			/* This is the default for the kernel and is the traditional keepalived behaviour */
+			new->mask &= ~( IPROUTE_BIT_ADD | IPROUTE_BIT_APPEND);
+		}
+		else if (!strcmp(str, "append")) {
+			new->mask |= IPROUTE_BIT_APPEND;
+			new->mask &= ~IPROUTE_BIT_ADD;
+		}
 		/* Maintained for backward compatibility */
 		else if (!strcmp(str, "or")) {
 			report_config_error(CONFIG_GENERAL_ERROR, "\"or\" for routes is deprecated. Please use \"nexthop\"");
@@ -1796,6 +1814,19 @@ alloc_route(list_head_t *rt_list, const vector_t *strvec, bool allow_track_group
 			if (!(new->track_group = static_track_group_find(strvec_slot(strvec, i))))
 				report_config_error(CONFIG_GENERAL_ERROR, "track_group %s not found", strvec_slot(strvec, i));
 		}
+#ifdef _HAVE_VRF_
+		else if (!strcmp(str, "vrf")) {
+			if (!(ifp = if_get_by_ifname(strvec_slot(strvec, ++i), IF_NO_CREATE))) {
+				report_config_error(CONFIG_GENERAL_ERROR, "VRF %s not found for route", strvec_slot(strvec, i));
+				goto err;
+			}
+			if (ifp->if_type != IF_TYPE_VRF) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Route specified VRF %s is not a VRF", strvec_slot(strvec, i));
+				goto err;
+			}
+			new->table = ifp->vrf_tb_id;
+		}
+#endif
 		else {
 			if (!strcmp(str, "to"))
 				i++;
@@ -1877,6 +1908,88 @@ err:
 	free_iproute(new);
 }
 
+static bool __attribute__ ((pure))
+compare_nexthops(const list_head_t *a, const list_head_t *b)
+{
+	nexthop_t *nh_a;
+	nexthop_t *nh_b;
+
+	if (list_empty(a) != list_empty(b))
+		return false;
+
+	if (list_empty(a))
+		return true;
+
+	nh_b = list_first_entry(b, nexthop_t, e_list);
+	list_for_each_entry(nh_a, a, e_list) {
+		if (list_is_last(&nh_a->e_list, a) != list_is_last(&nh_b->e_list, b))
+			return false;
+
+		/* Do some comparisons */
+		if (nh_a->mask != nh_b->mask ||
+		    compare_ipaddress(nh_a->addr, nh_b->addr) ||
+		    nh_a->ifp != nh_b->ifp ||
+		    nh_a->weight != nh_b->weight ||
+		    nh_a->flags != nh_b->flags ||
+		    nh_a->realms != nh_b->realms)
+			return false;
+
+#if HAVE_DECL_RTA_ENCAP
+		if (nh_a->encap.type != nh_b->encap.type ||
+		    nh_a->encap.flags != nh_b->encap.flags)
+			return false;
+
+		if (nh_a->encap.type == LWTUNNEL_ENCAP_NONE) {
+			/* Don't keep checking encap type if none */
+		}
+		else if (nh_a->encap.type == LWTUNNEL_ENCAP_IP) {
+			if (nh_a->encap.ip.id != nh_b->encap.ip.id ||
+			    compare_ipaddress(nh_a->encap.ip.dst, nh_b->encap.ip.dst) ||
+			    compare_ipaddress(nh_a->encap.ip.src, nh_b->encap.ip.src) ||
+			    nh_a->encap.ip.tos != nh_b->encap.ip.tos ||
+			    nh_a->encap.ip.flags != nh_b->encap.ip.flags ||
+			    nh_a->encap.ip.ttl != nh_b->encap.ip.ttl)
+				return false;
+		}
+		else if (nh_a->encap.type == LWTUNNEL_ENCAP_IP6) {
+			if (nh_a->encap.ip6.id != nh_b->encap.ip6.id ||
+			    compare_ipaddress(nh_a->encap.ip6.dst, nh_b->encap.ip6.dst) ||
+			    compare_ipaddress(nh_a->encap.ip6.src, nh_b->encap.ip6.src) ||
+			    nh_a->encap.ip6.tc != nh_b->encap.ip6.tc ||
+			    nh_a->encap.ip6.flags != nh_b->encap.ip6.flags ||
+			    nh_a->encap.ip6.hoplimit != nh_b->encap.ip6.hoplimit)
+				return false;
+		}
+#if HAVE_DECL_LWTUNNEL_ENCAP_ILA
+		else if (nh_a->encap.type == LWTUNNEL_ENCAP_ILA) {
+			if (nh_a->encap.ila.locator != nh_b->encap.ila.locator)
+				return false;
+		}
+#endif
+#if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
+		else if (nh_a->encap.type == LWTUNNEL_ENCAP_MPLS) {
+			size_t label;
+
+			if (nh_a->encap.mpls.num_labels != nh_b->encap.mpls.num_labels)
+				return false;
+			for (label = 0; label < nh_a->encap.mpls.num_labels; label++) {
+				if (nh_a->encap.mpls.addr[label].entry != nh_b->encap.mpls.addr[label].entry)
+					return false;
+			}
+		}
+#endif
+#endif
+
+		if (list_is_last(&nh_b->e_list, b))
+			return true;
+
+		nh_b = list_first_entry(&nh_b->e_list, nexthop_t, e_list);
+	}
+
+	/* NOT REACHED */
+	return false;
+}
+
 /* Try to find a route in a list */
 static ip_route_t *
 route_exist(list_head_t *l, ip_route_t *route)
@@ -1884,13 +1997,22 @@ route_exist(list_head_t *l, ip_route_t *route)
 	ip_route_t *ip_route;
 
 	list_for_each_entry(ip_route, l, e_list) {
-		/* The kernel's key to a route is (to, tos, preference, table) */
-		if (IP_ISEQ(ip_route->dst, route->dst) &&
+		/* The kernel's key to a route is (to, tos, preference, table),
+		 * but since we don't specify NLM_F_EXCL when adding a route we
+		 * also need to check via/nexthops, scope and type. */
+		if (!compare_ipaddress(ip_route->dst, route->dst) &&
 		    ip_route->dst->ifa.ifa_prefixlen == route->dst->ifa.ifa_prefixlen &&
+		    ip_route->tos == route->tos &&
 		    (!((ip_route->mask ^ route->mask) & IPROUTE_BIT_METRIC)) &&
 		    (!(ip_route->mask & IPROUTE_BIT_METRIC) ||
 		     ip_route->metric == route->metric) &&
-		    ip_route->table == route->table) {
+		    ip_route->table == route->table &&
+		    ip_route->scope == route->scope &&
+		    ip_route->type == route->type &&
+		    !ip_route->via == !route->via &&
+		    (!ip_route->via || !compare_ipaddress(ip_route->via, route->via)) &&
+		    ip_route->oif == route->oif &&
+		    compare_nexthops(&ip_route->nhs, &route->nhs)) {
 			ip_route->set = route->set;
 			return ip_route;
 		}
@@ -1910,7 +2032,8 @@ clear_diff_routes(list_head_t *l, list_head_t *n)
 
 	/* All routes removed */
 	if (list_empty(n)) {
-		log_message(LOG_INFO, "Removing a VirtualRoute block");
+		if (__test_bit(LOG_DETAIL_BIT, &debug))
+			log_message(LOG_INFO, "Removing a VirtualRoute block");
 		netlink_rtlist(l, IPROUTE_DEL, false);
 		return;
 	}
@@ -1918,8 +2041,9 @@ clear_diff_routes(list_head_t *l, list_head_t *n)
 	list_for_each_entry(route, l, e_list) {
 		if (route->set) {
 			if (!(new_route = route_exist(n, route))) {
-				log_message(LOG_INFO, "ip route %s/%d ... , no longer exist"
-						    , ipaddresstos(NULL, route->dst), route->dst->ifa.ifa_prefixlen);
+				if (__test_bit(LOG_DETAIL_BIT, &debug))
+					log_message(LOG_INFO, "Removing route %s"
+							    , ipaddresstos(NULL, route->dst));
 				netlink_route(route, IPROUTE_DEL);
 				continue;
 			}

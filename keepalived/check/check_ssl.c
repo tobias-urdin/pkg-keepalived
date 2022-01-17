@@ -26,6 +26,7 @@
 #include "config.h"
 
 #include <fcntl.h>
+#include <openssl/md5.h>
 #include <openssl/err.h>
 
 #include "check_ssl.h"
@@ -110,11 +111,9 @@ build_ssl_ctx(void)
 
 	/* Load our keys and certificates */
 	if (check_data->ssl->certfile)
-		if (!
-		    (SSL_CTX_use_certificate_chain_file
-		     (ssl->ctx, check_data->ssl->certfile))) {
-			log_message(LOG_INFO,
-			       "SSL error : Cant load certificate file...");
+		if (!(SSL_CTX_use_certificate_chain_file(ssl->ctx,
+							 check_data->ssl->certfile))) {
+			log_message(LOG_INFO, "SSL error : Cant load certificate file...");
 			return false;
 		}
 
@@ -126,18 +125,17 @@ build_ssl_ctx(void)
 	}
 
 	if (check_data->ssl->keyfile)
-		if (!
-		    (SSL_CTX_use_PrivateKey_file
-		     (ssl->ctx, check_data->ssl->keyfile, SSL_FILETYPE_PEM))) {
+		if (!(SSL_CTX_use_PrivateKey_file(ssl->ctx,
+						  check_data->ssl->keyfile,
+						  SSL_FILETYPE_PEM))) {
 			log_message(LOG_INFO, "SSL error : Cant load key file...");
 			return false;
 		}
 
 	/* Load the CAs we trust */
 	if (check_data->ssl->cafile)
-		if (!
-		    (SSL_CTX_load_verify_locations
-		     (ssl->ctx, check_data->ssl->cafile, 0))) {
+		if (!(SSL_CTX_load_verify_locations(ssl->ctx,
+						    check_data->ssl->cafile, 0))) {
 			log_message(LOG_INFO, "SSL error : Cant load CA file...");
 			return false;
 		}
@@ -210,7 +208,12 @@ ssl_connect(thread_ref_t thread, int new_req)
 	request_t *req = http_get_check->req;
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 	url_t *url = http_get_check->url_it;
-	const char* vhost = NULL;
+	/* The man page for SSL_set_tlsext_host_name states name is const char *,
+	 * but it is cast to a void * */
+	union {
+		const char *name_const;
+		char *name;
+	} vhost;
 #endif
 	int ret = 0;
 
@@ -241,13 +244,15 @@ ssl_connect(thread_ref_t thread, int new_req)
 #ifdef _HAVE_SSL_SET_TLSEXT_HOST_NAME_
 		if (http_get_check->enable_sni) {
 			if (url && url->virtualhost)
-				vhost = url->virtualhost;
+				vhost.name_const = url->virtualhost;
 			else if (http_get_check->virtualhost)
-				vhost = http_get_check->virtualhost;
+				vhost.name_const = http_get_check->virtualhost;
 			else if (checker->vs->virtualhost)
-				vhost = checker->vs->virtualhost;
-			if (vhost)
-				SSL_set_tlsext_host_name(req->ssl, vhost);
+				vhost.name_const = checker->vs->virtualhost;
+			else
+				vhost.name_const = NULL;
+			if (vhost.name)
+				SSL_set_tlsext_host_name(req->ssl, vhost.name);
 		}
 #endif
 	}
@@ -308,21 +313,29 @@ ssl_read_thread(thread_ref_t thread)
 	if (req->error == SSL_ERROR_WANT_READ) {
 		 /* async read unfinished */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 	} else if (r > 0 && req->error == SSL_ERROR_NONE) {
 		/* Handle response stream */
-		http_process_response(req, (size_t)r, url);
+		http_process_response(thread, req, (size_t)r, url);
 
 		/*
 		 * Register next ssl stream reader.
 		 * Register itself to not perturbe global I/O multiplexer.
 		 */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 	} else if (req->error) {
 		/* All the SSL stream has been parsed */
-		if (url->digest)
-			MD5_Final(digest, &req->context);
+		if (url->digest) {
+			EVP_DigestFinal_ex(req->context, digest, NULL);
+			EVP_MD_CTX_free(req->context);
+			req->context = NULL;
+			if (req->error == SSL_ERROR_ZERO_RETURN &&
+			    http_get_check->genhash_flags & GENHASH_VERBOSE)
+				dump_digest(digest, MD5_DIGEST_LENGTH);
+		} else
+			digest[0] = 0;
+
 		SSL_set_quiet_shutdown(req->ssl, 1);
 
 		r = (req->error == SSL_ERROR_ZERO_RETURN) ? SSL_shutdown(req->ssl) : 0;
