@@ -78,7 +78,7 @@ static void
 bfd_nbrip_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
-	struct sockaddr_storage nbr_addr;
+	sockaddr_t nbr_addr;
 
 	assert(strvec);
 	assert(bfd_data);
@@ -107,7 +107,7 @@ static void
 bfd_srcip_handler(const vector_t *strvec)
 {
 	bfd_t *bfd;
-	struct sockaddr_storage src_addr;
+	sockaddr_t src_addr;
 
 	assert(strvec);
 	assert(bfd_data);
@@ -138,13 +138,15 @@ bfd_minrx_handler(const vector_t *strvec)
 	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
-	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_MINRX_MIN * 1000, BFD_MINRX_MAX * 1000, 3, false))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_MINRX_MIN * 1000, BFD_MINRX_MAX * 1000, 3, false)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " min_rx value %s is not valid (must be in range"
 			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MINRX_MIN, BFD_MINRX_MAX);
-	else
-		bfd->local_min_rx_intv = value;
+		return;
+	}
+
+	bfd->local_min_rx_intv = value;
 
 	if (value > BFD_MINRX_MAX_SENSIBLE * 1000)
 		log_message(LOG_INFO, "Configuration warning: BFD instance %s"
@@ -164,13 +166,15 @@ bfd_mintx_handler(const vector_t *strvec)
 	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
-	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_MINTX_MIN * 1000, BFD_MINTX_MAX * 1000, 3, false))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_MINTX_MIN * 1000, BFD_MINTX_MAX * 1000, 3, false)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " min_tx value %s is not valid (must be in range"
 			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_MINTX_MIN, BFD_MINTX_MAX);
-	else
-		bfd->local_min_tx_intv = value;
+		return;
+	}
+
+	bfd->local_min_tx_intv = value;
 
 	if (value > BFD_MINTX_MAX_SENSIBLE * 1000)
 		log_message(LOG_INFO, "Configuration warning: BFD instance %s"
@@ -190,13 +194,15 @@ bfd_idletx_handler(const vector_t *strvec)
 	bfd = list_last_entry(&bfd_data->bfd, bfd_t, e_list);
 	assert(bfd);
 
-	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_IDLETX_MIN * 1000, BFD_IDLETX_MAX * 1000, 3, false))
+	if (!read_decimal_unsigned_strvec(strvec, 1, &value, BFD_IDLETX_MIN * 1000, BFD_IDLETX_MAX * 1000, 3, false)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: BFD instance %s"
 			    " idle_tx value %s is not valid (must be in range"
 			    " [%u-%u]), ignoring", bfd->iname, strvec_slot(strvec, 1),
 			    BFD_IDLETX_MIN, BFD_IDLETX_MAX);
-	else
-		bfd->local_idle_tx_intv = value;
+		return;
+	}
+
+	bfd->local_idle_tx_intv = value;
 
 	if (value > BFD_IDLETX_MAX_SENSIBLE * 1000)
 		log_message(LOG_INFO, "Configuration warning: BFD instance %s"
@@ -385,6 +391,8 @@ bfd_vrrp_handler(const vector_t *strvec)
 
 	name = strvec_slot(strvec, 1);
 	alloc_vrrp_tracked_bfd(name, &vrrp_data->vrrp_track_bfds);
+
+	specified_event_processes = 0;
 }
 #endif
 
@@ -450,6 +458,8 @@ bfd_checker_handler(const vector_t *strvec)
 	INIT_LIST_HEAD(&cbfd->tracking_rs);
 	cbfd->bname = STRDUP(name);
 	list_add_tail(&cbfd->e_list, &check_data->track_bfds);
+
+	specified_event_processes = 0;
 }
 #endif
 
@@ -477,8 +487,8 @@ init_bfd_keywords(bool active)
 {
 	bool bfd_handlers = false;
 
-	/* This will be called with active == false for parent and checker process,
-	 * for bfd, checker and vrrp process active will be true, but they are only interested
+	/* This will be called with active == false for parent process,
+	 * for bfd, checker and vrrp process active will be true, but they are interested
 	 * in different keywords. */
 #ifndef _ONE_PROCESS_DEBUG_
 	if (prog_type == PROG_TYPE_BFD || !active)

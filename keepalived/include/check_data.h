@@ -35,6 +35,7 @@
 
 
 /* local includes */
+#include "logger.h"
 #include "ip_vs.h"
 #include "list_head.h"
 #include "vector.h"
@@ -42,6 +43,10 @@
 #include "utils.h"
 #ifdef _WITH_BFD_
 #include "check_bfd.h"
+#endif
+#ifdef _WITH_NFTABLES_
+#include "logger.h"
+#include "sockaddr.h"
 #endif
 
 /* Daemon dynamic data structure definition */
@@ -71,7 +76,7 @@ typedef struct _ssl_data {
 
 /* Real Server definition */
 typedef struct _real_server {
-	struct sockaddr_storage		addr;
+	sockaddr_t			addr;
 	int64_t				effective_weight;
 	int64_t				peffective_weight; /* previous weight
 							    * used for reloading */
@@ -83,6 +88,9 @@ typedef struct _real_server {
 #ifdef _HAVE_IPVS_TUN_CSUM_
 	int				tun_flags;	/* tunnel checksum type for gue/gre tunnels */
 #endif
+#endif
+#ifdef _WITH_SNMP_CHECKER_
+	const char			*snmp_name;
 #endif
 	uint32_t			u_threshold;	/* Upper connection limit. */
 	uint32_t			l_threshold;	/* Lower connection limit. */
@@ -128,8 +136,8 @@ typedef struct _virtual_server_group_entry {
 	bool				is_fwmark;
 	union {
 		struct {
-			struct sockaddr_storage	addr;
-			struct sockaddr_storage	addr_end;
+			sockaddr_t	addr;
+			sockaddr_t	addr_end;
 			unsigned	tcp_alive;
 			unsigned	udp_alive;
 			unsigned	sctp_alive;
@@ -166,7 +174,7 @@ typedef struct _virtual_server_group {
 typedef struct _virtual_server {
 	const char			*vsgname;
 	virtual_server_group_t		*vsg;
-	struct sockaddr_storage		addr;
+	sockaddr_t			addr;
 	uint32_t			vfwmark;
 	real_server_t			*s_svr;
 	bool				s_svr_duplicates_rs;
@@ -185,6 +193,9 @@ typedef struct _virtual_server {
 #ifdef _HAVE_IPVS_TUN_CSUM_
 	int				tun_flags;	/* tunnel checksum type for gue/gre tunnels */
 #endif
+#endif
+#ifdef _WITH_SNMP_CHECKER_
+	const char			*snmp_name;
 #endif
 	uint32_t			persistence_granularity;
 	const char			*virtualhost;	/* Default virtualhost for HTTP and SSL healthcheckers

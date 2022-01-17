@@ -68,6 +68,46 @@ ipaddresstos(char *buf, const ip_address_t *ip_addr)
 	return buf;
 }
 
+bool
+compare_ipaddress(const ip_address_t *X, const ip_address_t *Y)
+{
+	if (!X && !Y)
+		return false;
+
+	if (!X != !Y ||
+	    X->ifa.ifa_family != Y->ifa.ifa_family)
+		return true;
+
+	if (X->ifa.ifa_prefixlen != Y->ifa.ifa_prefixlen ||
+// We can't check ifp here and later. On a reload, has ifp been set up by now?
+//	    !X->ifp != !Y->ifp ||
+#ifdef _HAVE_VRRP_VMAC_
+	    X->use_vmac != Y->use_vmac ||
+#endif
+	    X->ifa.ifa_scope != Y->ifa.ifa_scope)
+		return true;
+
+	if (X->ifp &&
+#ifdef _HAVE_VRRP_VMAC_
+	    X->ifp->base_ifp != Y->ifp->base_ifp
+#else
+	    X->ifp != Y->ifp
+#endif
+				)
+		return true;
+
+	if (!string_equal(X->label, Y->label))
+		return true;
+
+	if (X->ifa.ifa_family == AF_INET6)
+		return X->u.sin6_addr.s6_addr32[0] != Y->u.sin6_addr.s6_addr32[0] ||
+			X->u.sin6_addr.s6_addr32[1] != Y->u.sin6_addr.s6_addr32[1] ||
+			X->u.sin6_addr.s6_addr32[2] != Y->u.sin6_addr.s6_addr32[2] ||
+			X->u.sin6_addr.s6_addr32[3] != Y->u.sin6_addr.s6_addr32[3];
+
+	return X->u.sin.sin_addr.s_addr != Y->u.sin.sin_addr.s_addr;
+}
+
 /* Add/Delete IP address to a specific interface_t */
 int
 netlink_ipaddress(ip_address_t *ip_addr, int cmd)
@@ -247,6 +287,11 @@ format_ipaddress(const ip_address_t *ip_addr, char *buf, size_t buf_len)
 	char *buf_p = buf;
 	char *buf_end = buf + buf_len;
 
+	if (ip_addr->ifa.ifa_family == AF_UNSPEC) {
+		snprintf(buf_p, buf_end - buf_p, "None");
+		return;
+	}
+
 	buf_p += snprintf(buf_p, buf_end - buf_p, "%s", ipaddresstos(NULL, ip_addr));
 	if (!IP_IS6(ip_addr) && ip_addr->u.sin.sin_brd.s_addr) {
 		buf_p += snprintf(buf_p, buf_end - buf_p, " brd %s",
@@ -254,6 +299,9 @@ format_ipaddress(const ip_address_t *ip_addr, char *buf, size_t buf_len)
 	}
 	buf_p += snprintf(buf_p, buf_end - buf_p, " dev %s", IF_NAME(ip_addr->ifp));
 #ifdef _HAVE_VRRP_VMAC_
+	if (!ip_addr->ifp)
+		buf_p += snprintf(buf_p, buf_end - buf_p, "@NOWHERE");
+	else
 	if (ip_addr->ifp != ip_addr->ifp->base_ifp)
 		buf_p += snprintf(buf_p, buf_end - buf_p, "@%s", ip_addr->ifp->base_ifp->ifname);
 	if (ip_addr->use_vmac)
@@ -513,8 +561,15 @@ alloc_ipaddress(list_head_t *ip_list, const vector_t *strvec, bool static_addr)
 				break;
 			}
 
-			new->label = MALLOC(IFNAMSIZ);
-			strncpy(new->label, strvec_slot(strvec, ++i), IFNAMSIZ);
+			param = strvec_slot(strvec, ++i);
+			if (strlen(param) >= IFNAMSIZ) {
+				report_config_error(CONFIG_GENERAL_ERROR, "Address label %s is longer than maximum length %d - removing address", param, IFNAMSIZ - 1);
+				FREE(new);
+				return;
+			}
+
+			new->label = MALLOC(strlen(param) + 1);
+			strcpy(new->label, param);
 		} else if (!strcmp(str, "peer")) {
 			if (!param_avail) {
 				param_missing = true;
@@ -683,7 +738,7 @@ address_exist(vrrp_t *vrrp, ip_address_t *ip_addr)
 
 	for (vip_list = &vrrp->vip; vip_list; vip_list = vip_list == &vrrp->vip ? &vrrp->evip : NULL ) {
 		list_for_each_entry(ipaddr, vip_list, e_list) {
-			if (IP_ISEQ(ipaddr, ip_addr)) {
+			if (!compare_ipaddress(ipaddr, ip_addr)) {
 				ipaddr->set = ip_addr->set;
 #ifdef _WITH_IPTABLES_
 				ipaddr->iptable_rule_set = ip_addr->iptable_rule_set;

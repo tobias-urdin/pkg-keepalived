@@ -1,4 +1,4 @@
-.TH KEEPALIVED "8" "2021-02-21"
+.TH KEEPALIVED "8" "2022-01-06"
 
 .na
 .nh
@@ -27,6 +27,7 @@ keepalived \- load\-balancing and high\-availability service
 [\fB\-d\fP|\fB\-\-dump\-conf\fP]
 [\fB\-p\fP|\fB\-\-pid\fP=FILE]
 [\fB\-r\fP|\fB\-\-vrrp_pid\fP=FILE]
+[\fB\-T\fP|\fB\-\-genhash\fP]
 [\fB\-c\fP|\fB\-\-checkers_pid\fP=FILE]
 [\fB\-a\fP|\fB\-\-address-monitoring\fP]
 [\fB\-b\fP|\fB\-\-bfd_pid\fP=FILE]
@@ -61,6 +62,7 @@ with director failover.
 \fB -f, --use-file\fP=FILE
 Use the specified configuration file. The default configuration file
 is "/usr/local/etc/keepalived/keepalived.conf".
+Deprecated alternative is "/etc/keepalived/keepalived.conf".
 .TP
 \fB -P, --vrrp\fP
 Only run the VRRP subsystem. This is useful for configurations that do
@@ -133,6 +135,12 @@ below for more details.
 Use the specified pidfile for the VRRP child process. The default pidfile
 for the VRRP child process is "/run/keepalived_vrrp.pid", unless a
 network namespace is being used.
+.TP
+\fB -T, --genhash\fP
+Enter genhash utility mode. Previous versions of keepalived were shipped with a
+dedicated genhash utility. genhash is now part of the mainline code. We keep
+compatibility with previous genhash utility command line option. For more
+information please refer to the genhash(1) manpage.
 .TP
 \fB -c, --checkers_pid\fP=FILE
 Use the specified pidfile for checkers child process. The default pidfile

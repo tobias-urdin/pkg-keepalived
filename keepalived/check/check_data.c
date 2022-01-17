@@ -86,7 +86,7 @@ dump_ssl(FILE *fp)
 	}
 
 	if (ssl->password)
-		conf_write(fp, " Password : %s", ssl->password);
+		conf_write(fp, " Password : %s", ssl->password);	/* lgtm[security] lgtm[external/cwe/cwe-313] the password is read from a file */
 	if (ssl->cafile)
 		conf_write(fp, " CA-file : %s", ssl->cafile);
 	if (ssl->certfile)
@@ -444,6 +444,9 @@ free_rs(real_server_t *rs)
 	free_checker_tracked_bfd_list(&rs->tracked_bfds);
 #endif
 	FREE_CONST_PTR(rs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	FREE_CONST_PTR(rs->snmp_name);
+#endif
 	free_rs_checkers(rs);
 	FREE(rs);
 }
@@ -465,6 +468,21 @@ dump_tracking_rs(FILE *fp, const void *data)
 	conf_write(fp, "     %s -> %s, weight %d%s", FMT_VS(checker->vs), FMT_RS(checker->rs, checker->vs), top->weight, top->weight_multiplier == -1 ? " reverse" : "");
 }
 
+static const char *
+format_decimal(unsigned long val, int dp)
+{
+	static char buf[22];	/* Sufficient for 2^64 as decimal plus decimal point */
+	unsigned dp_factor = 1;
+	int i;
+
+	for (i = 0; i < dp; i++)
+		dp_factor *= 10;
+
+	snprintf(buf, sizeof(buf), "%lu.%*.*lu", val / dp_factor, dp, dp, val % dp_factor);
+
+	return buf;
+}
+
 static void
 dump_rs(FILE *fp, const real_server_t *rs)
 {
@@ -480,15 +498,15 @@ dump_rs(FILE *fp, const real_server_t *rs)
 	dump_forwarding_method(fp, "", rs);
 
 	conf_write(fp, "   Alpha is %s", rs->alpha ? "ON" : "OFF");
-	conf_write(fp, "   connection timeout = %f", ((double)rs->connection_to) / TIMER_HZ);
+	conf_write(fp, "   connection timeout = %s", format_decimal(rs->connection_to, TIMER_HZ_DIGITS));
 	conf_write(fp, "   connection limit range = %" PRIu32 " -> %" PRIu32, rs->l_threshold, rs->u_threshold);
-	conf_write(fp, "   Delay loop = %f" , (double)rs->delay_loop / TIMER_HZ);
+	conf_write(fp, "   Delay loop = %s" , format_decimal(rs->delay_loop, TIMER_HZ_DIGITS));
 	if (rs->retry != UINT_MAX)
 		conf_write(fp, "   Retry count = %u" , rs->retry);
 	if (rs->delay_before_retry != ULONG_MAX)
-		conf_write(fp, "   Retry delay = %f" , (double)rs->delay_before_retry / TIMER_HZ);
+		conf_write(fp, "   Retry delay = %s" , format_decimal(rs->delay_before_retry, TIMER_HZ_DIGITS));
 	if (rs->warmup != ULONG_MAX)
-		conf_write(fp, "   Warmup = %f", (double)rs->warmup / TIMER_HZ);
+		conf_write(fp, "   Warmup = %s", format_decimal(rs->warmup, TIMER_HZ_DIGITS));
 	conf_write(fp, "   Inhibit on failure is %s", rs->inhibit ? "ON" : "OFF");
 
 	if (rs->notify_up)
@@ -498,7 +516,11 @@ dump_rs(FILE *fp, const real_server_t *rs)
 		conf_write(fp, "     RS down notify script = %s, uid:gid %u:%u",
 				cmd_str(rs->notify_down), rs->notify_down->uid, rs->notify_down->gid);
 	if (rs->virtualhost)
-		conf_write(fp, "    VirtualHost = %s", rs->virtualhost);
+		conf_write(fp, "    VirtualHost = '%s'", rs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	if (rs->snmp_name)
+		conf_write(fp, "   SNMP name = %s", rs->snmp_name);
+#endif
 	conf_write(fp, "   Using smtp notification = %s", rs->smtp_alert ? "yes" : "no");
 
 	conf_write(fp, "   initial weight = %d", rs->iweight);
@@ -522,6 +544,7 @@ dump_rs(FILE *fp, const real_server_t *rs)
 	}
 #endif
 }
+
 static void
 dump_rs_list(FILE *fp, const list_head_t *l)
 {
@@ -589,6 +612,9 @@ alloc_rs(const char *ip, const char *port)
 	new->retry = UINT_MAX;
 	new->delay_before_retry = ULONG_MAX;
 	new->virtualhost = NULL;
+#ifdef _WITH_SNMP_CHECKER_
+	new->snmp_name = NULL;
+#endif
 	new->smtp_alert = -1;
 
 	list_add_tail(&new->e_list, &vs->rs);
@@ -604,6 +630,9 @@ free_vs(virtual_server_t *vs)
 	list_del_init(&vs->e_list);
 	FREE_CONST_PTR(vs->vsgname);
 	FREE_CONST_PTR(vs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	FREE_CONST_PTR(vs->snmp_name);
+#endif
 	FREE_PTR(vs->s_svr);
 	free_rs_list(&vs->rs);
 	free_notify_script(&vs->notify_quorum_up);
@@ -634,14 +663,18 @@ dump_vs(FILE *fp, const virtual_server_t *vs)
 				    , inet_sockaddrtos(&vs->addr), ntohs(inet_sockaddrport(&vs->addr)));
 	if (vs->virtualhost)
 		conf_write(fp, "   VirtualHost = %s", vs->virtualhost);
+#ifdef _WITH_SNMP_CHECKER_
+	if (vs->snmp_name)
+		conf_write(fp, "   SNMP name = '%s'", vs->snmp_name);
+#endif
 	if (vs->af != AF_UNSPEC)
 		conf_write(fp, "   Address family = inet%s", vs->af == AF_INET ? "" : "6");
 	else if (vs->vsg && vs->vsg->have_ipv4 && vs->vsg->have_ipv6)
 		conf_write(fp, "   Address family = IPv4 & IPv6");
 	else
 		conf_write(fp, "   Address family = unknown");
-	conf_write(fp, "   connection timeout = %f", (double)vs->connection_to / TIMER_HZ);
-	conf_write(fp, "   delay_loop = %f", (double)vs->delay_loop / TIMER_HZ);
+	conf_write(fp, "   connection timeout = %s", format_decimal(vs->connection_to, TIMER_HZ_DIGITS));
+	conf_write(fp, "   delay_loop = %s", format_decimal(vs->delay_loop, TIMER_HZ_DIGITS));
 	conf_write(fp, "   lvs_sched = %s", vs->sched);
 	conf_write(fp, "   Hashed = %sabled", vs->flags & IP_VS_SVC_F_HASHED ? "en" : "dis");
 #ifdef IP_VS_SVC_F_SCHED1
@@ -691,9 +724,9 @@ dump_vs(FILE *fp, const virtual_server_t *vs)
 	if (vs->retry != UINT_MAX)
 		conf_write(fp, "   Retry count = %u" , vs->retry);
 	if (vs->delay_before_retry != ULONG_MAX)
-		conf_write(fp, "   Retry delay = %f" , (double)vs->delay_before_retry / TIMER_HZ);
+		conf_write(fp, "   Retry delay = %s" , format_decimal(vs->delay_before_retry, TIMER_HZ_DIGITS));
 	if (vs->warmup != ULONG_MAX)
-		conf_write(fp, "   Warmup = %f", (double)vs->warmup / TIMER_HZ);
+		conf_write(fp, "   Warmup = %s", format_decimal(vs->warmup, TIMER_HZ_DIGITS));
 	conf_write(fp, "   Inhibit on failure is %s", vs->inhibit ? "ON" : "OFF");
 	conf_write(fp, "   quorum = %u, hysteresis = %u", vs->quorum, vs->hysteresis);
 	if (vs->notify_quorum_up)
@@ -785,6 +818,9 @@ alloc_vs(const char *param1, const char *param2)
 	}
 
 	new->virtualhost = NULL;
+#ifdef _WITH_SNMP_CHECKER_
+	new->snmp_name = NULL;
+#endif
 	new->alpha = false;
 	new->omega = false;
 	new->notify_quorum_up = NULL;

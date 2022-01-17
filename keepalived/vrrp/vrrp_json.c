@@ -127,10 +127,11 @@ vrrp_json_array_dump(json_writer_t *wr, const char *prop, list_head_t *l,
 	return 0;
 }
 
+#if defined _WITH_VRRP_AUTH_
 static int
 vrrp_json_auth_dump(json_writer_t *wr, const char *prop, vrrp_t *vrrp)
 {
-	char buf[256];
+	char buf[sizeof(vrrp->auth_data) + 1];
 
 	if (!vrrp->auth_type)
 		return -1;
@@ -140,6 +141,7 @@ vrrp_json_auth_dump(json_writer_t *wr, const char *prop, vrrp_t *vrrp)
 	jsonw_string_field(wr, prop, buf);
 	return 0;
 }
+#endif
 
 static int
 vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
@@ -150,8 +152,8 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 
 	/* Global instance related */
 	jsonw_string_field(wr, "iname", vrrp->iname);
-	jsonw_uint_field(wr, "dont_track_primary", vrrp->dont_track_primary);
-	jsonw_uint_field(wr, "skip_check_adv_addr", vrrp->skip_check_adv_addr);
+	jsonw_uint_field(wr, "dont_track_primary", __test_bit(VRRP_FLAG_DONT_TRACK_PRIMARY, &vrrp->flags));
+	jsonw_uint_field(wr, "skip_check_adv_addr", __test_bit(VRRP_FLAG_SKIP_CHECK_ADV_ADDR, &vrrp->flags));
 	jsonw_uint_field(wr, "strict_mode", vrrp->strict_mode);
 #ifdef _HAVE_VRRP_VMAC_
 	jsonw_string_field(wr, "vmac_ifname", vrrp->vmac_ifname);
@@ -160,7 +162,7 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 		jsonw_string_field(wr, "ifp_ifname", vrrp->ifp->ifname);
 	jsonw_uint_field(wr, "master_priority", vrrp->master_priority);
 	jsonw_float_field_fmt(wr, "last_transition", "%f", timeval_to_double(&vrrp->last_transition));
-	jsonw_float_field(wr, "garp_delay", vrrp->garp_delay / TIMER_HZ_FLOAT);
+	jsonw_float_field(wr, "garp_delay", vrrp->garp_delay / TIMER_HZ_DOUBLE);
 	jsonw_uint_field(wr, "garp_refresh", vrrp->garp_refresh.tv_sec);
 	jsonw_uint_field(wr, "garp_rep", vrrp->garp_rep);
 	jsonw_uint_field(wr, "garp_refresh_rep", vrrp->garp_refresh_rep);
@@ -172,13 +174,13 @@ vrrp_json_data_dump(json_writer_t *wr, vrrp_t *vrrp)
 	jsonw_uint_field(wr, "base_priority", vrrp->base_priority);
 	jsonw_uint_field(wr, "effective_priority", vrrp->effective_priority);
 	jsonw_bool_field(wr, "vipset", vrrp->vipset);
-	jsonw_bool_field(wr, "promote_secondaries", vrrp->promote_secondaries);
-	jsonw_float_field(wr, "adver_int", vrrp->adver_int / TIMER_HZ_FLOAT);
-	jsonw_float_field(wr, "master_adver_int", vrrp->master_adver_int / TIMER_HZ_FLOAT);
+	jsonw_bool_field(wr, "promote_secondaries", __test_bit(VRRP_FLAG_PROMOTE_SECONDARIES, &vrrp->flags));
+	jsonw_float_field(wr, "adver_int", vrrp->adver_int / TIMER_HZ_DOUBLE);
+	jsonw_float_field(wr, "master_adver_int", vrrp->master_adver_int / TIMER_HZ_DOUBLE);
 #ifdef _WITH_FIREWALL_
 	jsonw_uint_field(wr, "accept", vrrp->accept);
 #endif
-	jsonw_bool_field(wr, "nopreempt", vrrp->nopreempt);
+	jsonw_bool_field(wr, "nopreempt", __test_bit(VRRP_FLAG_NOPREEMPT, &vrrp->flags));
 	jsonw_uint_field(wr, "preempt_delay", vrrp->preempt_delay / TIMER_HZ);
 	jsonw_uint_field(wr, "state", vrrp->state);
 	jsonw_uint_field(wr, "wantstate", vrrp->wantstate);
@@ -276,16 +278,18 @@ void
 vrrp_print_json(void)
 {
 	FILE *fp;
+	const char *filename;
 
 	if (list_empty(&vrrp_data->vrrp))
 		return;
 
-	fp = fopen_safe(KA_TMP_DIR "/keepalived.json", "w");
-	if (!fp) {
-		log_message(LOG_INFO, "Can't open " KA_TMP_DIR "/keepalived.json (%d: %m)", errno);
-		return;
-	}
+	filename = make_tmp_filename("keepalived.json");
+	fp = fopen_safe(filename, "w");
+	if (fp) {
+		vrrp_json_dump(fp);
+		fclose(fp);
+	} else
+		log_message(LOG_INFO, "Can't open %s/keepalived.json (%d: %m)", tmp_dir, errno);
 
-	vrrp_json_dump(fp);
-	fclose(fp);
+	FREE_CONST(filename);
 }

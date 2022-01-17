@@ -28,7 +28,6 @@
 #include <sys/prctl.h>
 #include <fcntl.h>
 #include <sys/time.h>
-#include <sys/resource.h>
 
 #include "bfd.h"
 #include "bfd_daemon.h"
@@ -76,8 +75,6 @@ static unsigned bfd_next_restart_delay;
 static void
 stop_bfd(int status)
 {
-	struct rusage usage;
-
 	if (__test_bit(CONFIG_TEST_BIT, &debug))
 		return;
 
@@ -96,12 +93,7 @@ stop_bfd(int status)
 	 * Reached when terminate signal catched.
 	 * finally return to parent process.
 	 */
-	if (__test_bit(LOG_DETAIL_BIT, &debug)) {
-		getrusage(RUSAGE_SELF, &usage);
-		log_message(LOG_INFO, "Stopped - used %ld.%6.6ld user time, %ld.%6.6ld system time", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
-	}
-	else
-		log_message(LOG_INFO, "Stopped");
+	log_stopping();
 
 #ifdef ENABLE_LOG_TO_FILE
 	if (log_file_name)
@@ -160,12 +152,6 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 
 	init_data(conf_file, bfd_init_keywords, false);
 
-#ifndef _ONE_PROCESS_DEBUG_
-	/* Notify parent config has been read if appropriate */
-	if (!__test_bit(CONFIG_TEST_BIT, &debug))
-		notify_config_read();
-#endif
-
 	if (reload)
 		init_global_data(global_data, prev_global_data, true);
 
@@ -187,11 +173,10 @@ start_bfd(__attribute__((unused)) data_t *prev_global_data)
 		stop_bfd(KEEPALIVED_EXIT_CONFIG);
 		return;
 	}
-#endif
 
-	/* Post initializations */
-#ifdef _MEM_CHECK_
-	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+	/* Notify parent config has been read if appropriate */
+	if (!__test_bit(CONFIG_TEST_BIT, &debug))
+		notify_config_read();
 #endif
 
 	if (__test_bit(DUMP_CONF_BIT, &debug))
@@ -273,18 +258,24 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 	/* Use standard scheduling while reloading */
 	reset_process_priorities();
 
+#ifndef _ONE_PROCESS_DEBUG_
+	save_config(false, "bfd", dump_bfd_data_global);
+#endif
+
 	/* set the reloading flag */
 	SET_RELOAD;
 
 	/* Destroy master thread */
 	bfd_dispatcher_release(bfd_data);
-	thread_cleanup_master(master);
+	thread_cleanup_master(master, true);
 	thread_add_base_threads(master, false);
 
 	old_bfd_data = bfd_data;
 	bfd_data = NULL;
 	old_global_data = global_data;
 	global_data = NULL;
+
+	reinitialise_global_vars();
 
 	/* Reload the conf */
 	signal_set(SIGCHLD, thread_child_handler, master);
@@ -293,10 +284,19 @@ reload_bfd_thread(__attribute__((unused)) thread_ref_t thread)
 	free_bfd_data(old_bfd_data);
 	free_global_data(old_global_data);
 
+#ifndef _ONE_PROCESS_DEBUG_
+	save_config(true, "bfd", dump_bfd_data_global);
+#endif
+
 	UNSET_RELOAD;
 
 	set_time_now();
 	log_message(LOG_INFO, "Reload finished in %lu usec", -timer_long(timer_sub_now(timer)));
+
+	/* Post initializations */
+#ifdef _MEM_CHECK_
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
+#endif
 }
 
 /* This function runs in the parent process. */
@@ -311,12 +311,13 @@ static void
 bfd_respawn_thread(thread_ref_t thread)
 {
 	unsigned restart_delay;
+	int ret;
 
 	/* We catch a SIGCHLD, handle it */
 	bfd_child = 0;
 
-	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
-		thread_add_terminate_event(thread->master);
+	if ((ret = report_child_status(thread->u.c.status, thread->u.c.pid, NULL)))
+		thread_add_parent_terminate_event(thread->master, ret);
 	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
 		log_child_died("BFD", thread->u.c.pid);
 
@@ -335,9 +336,6 @@ bfd_respawn_thread(thread_ref_t thread)
 static void
 register_bfd_thread_addresses(void)
 {
-	/* Remove anything we might have inherited from parent */
-	deregister_thread_addresses();
-
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 
@@ -389,6 +387,10 @@ start_bfd_child(void)
 
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Check our parent hasn't already changed since the fork */
+	if (main_pid != getppid())
+		kill(getpid(), SIGTERM);
+
 	prog_type = PROG_TYPE_BFD;
 
 	/* Close the read end of the event notification pipes, and the track_process fd */
@@ -400,6 +402,11 @@ start_bfd_child(void)
 #endif
 #ifdef _WITH_LVS_
 	close(bfd_checker_event_pipe[0]);
+#endif
+
+#ifdef THREAD_DUMP
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
 #endif
 
 	initialise_debug_options();
@@ -479,6 +486,11 @@ start_bfd_child(void)
 
 #ifdef THREAD_DUMP
 	register_bfd_thread_addresses();
+#endif
+
+	/* Post initializations */
+#ifdef _MEM_CHECK_
+	log_message(LOG_INFO, "Configuration is using : %zu Bytes", mem_allocated);
 #endif
 
 	/* Launch the scheduling I/O multiplexer */

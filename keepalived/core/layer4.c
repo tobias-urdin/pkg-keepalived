@@ -27,13 +27,14 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <net/if.h>
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
 #ifdef ERRQUEUE_NEEDS_SYS_TIME
 #include <sys/time.h>
 #endif
 #include <linux/errqueue.h>
-#include <netinet/in.h>
 
 #include "layer4.h"
 #include "logger.h"
@@ -84,8 +85,8 @@ socket_bind_connect(int fd, conn_opts_t *co)
 	struct linger li;
 	socklen_t addrlen;
 	int ret;
-	const struct sockaddr_storage *addr = &co->dst;
-	const struct sockaddr_storage *bind_addr = &co->bindto;
+	const sockaddr_t *addr = &co->dst;
+	const sockaddr_t *bind_addr = &co->bindto;
 
 	optlen = sizeof(opt);
 	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, (void *)&opt, &optlen) < 0) {
@@ -159,7 +160,7 @@ socket_bind_connect(int fd, conn_opts_t *co)
 }
 
 enum connect_result
-socket_connect(int fd, const struct sockaddr_storage *addr)
+socket_connect(int fd, const sockaddr_t *addr)
 {
 	conn_opts_t co = { .dst = *addr };
 
@@ -167,7 +168,7 @@ socket_connect(int fd, const struct sockaddr_storage *addr)
 }
 
 enum connect_result
-socket_state(thread_ref_t thread, thread_func_t func)
+socket_state(thread_ref_t thread, thread_func_t func, unsigned extra_flags)
 {
 	int status;
 	socklen_t addrlen;
@@ -198,7 +199,7 @@ socket_state(thread_ref_t thread, thread_func_t func)
 	if (status == EINPROGRESS) {
 		timer_min = timer_sub_now(thread->sands);
 		thread_add_write(thread->master, func, THREAD_ARG(thread),
-				 thread->u.f.fd, -timer_long(timer_min), true);
+				 thread->u.f.fd, -timer_long(timer_min), THREAD_DESTROY_CLOSE_FD | extra_flags);
 		return connect_in_progress;
 	}
 
@@ -215,30 +216,24 @@ socket_state(thread_ref_t thread, thread_func_t func)
 #ifdef _WITH_LVS_
 bool
 socket_connection_state(int fd, enum connect_result status, thread_ref_t thread,
-		     thread_func_t func, unsigned long timeout)
+			thread_func_t func, unsigned long timeout, unsigned extra_flags)
 {
-	void *checker;
-
-	checker = THREAD_ARG(thread);
-
 	if (status == connect_success ||
 	    status == connect_in_progress) {
-		thread_add_write(thread->master, func, checker, fd, timeout, true);
+		thread_add_write(thread->master, func, THREAD_ARG(thread), fd, timeout, THREAD_DESTROY_CLOSE_FD | extra_flags);
 		return false;
 	}
 
 	return true;
 }
-#endif
 
-#ifdef _WITH_LVS_
 enum connect_result
 udp_bind_connect(int fd, conn_opts_t *co, uint8_t *payload, uint16_t payload_len)
 {
 	socklen_t addrlen;
 	ssize_t ret;
-	const struct sockaddr_storage *addr = &co->dst;
-	const struct sockaddr_storage *bind_addr = &co->bindto;
+	const sockaddr_t *addr = &co->dst;
+	const sockaddr_t *bind_addr = &co->bindto;
 	char buf[UDP_BUFSIZE];
 	int on = 1;
 	int err;
@@ -425,6 +420,7 @@ enum connect_result
 udp_socket_state(int fd, thread_ref_t thread, uint8_t *recv_buf, size_t *len)
 {
 	int ret;
+	char local_recv_buf;
 
 	/* Handle Read timeout, we consider it success unless require_reply is set */
 	if (thread->type == THREAD_READ_TIMEOUT)
@@ -433,7 +429,12 @@ udp_socket_state(int fd, thread_ref_t thread, uint8_t *recv_buf, size_t *len)
 	if (thread->type == THREAD_READ_ERROR)
 		return udp_socket_error(fd);
 
-	ret = recv(fd, recv_buf, *len, 0);
+	if (recv_buf) {
+		ret = recv(fd, recv_buf, *len, 0);
+		*len = ret;
+	} else {
+		ret = recv(fd, &local_recv_buf, sizeof(local_recv_buf), 0);
+	}
 
 	/* Ret less than 0 means the port is unreachable.
 	 * Otherwise, we consider it success.
@@ -442,7 +443,6 @@ udp_socket_state(int fd, thread_ref_t thread, uint8_t *recv_buf, size_t *len)
 	if (ret < 0)
 		return connect_error;
 
-	*len = ret;
 	return connect_success;
 }
 
@@ -455,7 +455,7 @@ udp_icmp_check_state(int fd, enum connect_result status, thread_ref_t thread,
 	checker = THREAD_ARG(thread);
 
 	if (status == connect_success) {
-		thread_add_read(thread->master, func, checker, fd, timeout, true);
+		thread_add_read(thread->master, func, checker, fd, timeout, THREAD_DESTROY_CLOSE_FD);
 		return false;
 	}
 

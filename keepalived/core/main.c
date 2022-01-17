@@ -38,6 +38,7 @@
 #include <getopt.h>
 #include <linux/version.h>
 #include <ctype.h>
+#include <sys/prctl.h>
 
 #include "main.h"
 #include "global_data.h"
@@ -56,6 +57,7 @@
 #include "notify.h"
 #include "track_file.h"
 #ifdef _WITH_LVS_
+#include "check_genhash.h"
 #include "check_parser.h"
 #include "check_daemon.h"
 #endif
@@ -144,7 +146,7 @@ static const struct child_term children_term[] = {
 
 /* global var */
 const char *version_string = VERSION_STRING;		/* keepalived version */
-const char *conf_file = KEEPALIVED_CONFIG_FILE;		/* Configuration file */
+const char *conf_file;					/* Configuration file */
 bool reload;						/* Set during a reload */
 const char *main_pidfile;				/* overrule default pidfile */
 static bool free_main_pidfile;
@@ -208,10 +210,6 @@ static bool set_core_dump_pattern = false;
 static bool create_core_dump = false;
 static const char *core_dump_pattern = "core";
 static char *orig_core_dump_pattern = NULL;
-
-#ifndef _ONE_PROCESS_DEBUG_
-static const char *dump_file = KA_TMP_DIR "/keepalived_parent.data";
-#endif
 
 /* debug flags */
 #if defined _TIMER_CHECK_ || \
@@ -313,6 +311,9 @@ free_parent_mallocs_startup(bool am_child)
 		syslog_ident = NULL;
 
 		FREE_PTR(orig_core_dump_pattern);
+
+		free_notify_script(&global_data->startup_script);
+		free_notify_script(&global_data->shutdown_script);
 	}
 
 	if (free_main_pidfile) {
@@ -469,7 +470,7 @@ create_reload_file(void)
 		umask(umask_val);
 }
 
-static inline void
+static void
 remove_reload_file(void)
 {
 	if (global_data->reload_file && !__test_bit(CONFIG_TEST_BIT, &debug))
@@ -527,6 +528,15 @@ static void
 start_keepalived(__attribute__((unused)) thread_ref_t thread)
 {
 	bool have_child = false;
+
+	/* Although we use prctl to set PDEATHSIG, there are windows when it
+	 * is not set, i.e. before it is first executed after a fork, and also
+	 * after set(e)[ug]id() calls before PDEATHSIG can be reinstated. */
+	main_pid = getpid();
+
+	/* We want to ensure that any children of child process don't miss the
+	 * termination of their immediate parent. */
+	prctl(PR_SET_CHILD_SUBREAPER, 1);
 
 #ifdef _WITH_BFD_
 	/* must be opened before vrrp and bfd start */
@@ -721,16 +731,31 @@ config_test_exit(void)
 
 	switch (config_err) {
 	case CONFIG_OK:
-		exit(KEEPALIVED_EXIT_OK);
+		exit(KEEPALIVED_CHK_EXIT_OK);
 	case CONFIG_FILE_NOT_FOUND:
 	case CONFIG_BAD_IF:
 	case CONFIG_FATAL:
-		exit(KEEPALIVED_EXIT_CONFIG);
+		exit(KEEPALIVED_CHK_EXIT_CONFIG);
 	case CONFIG_SECURITY_ERROR:
-		exit(KEEPALIVED_EXIT_CONFIG_TEST_SECURITY);
+		exit(KEEPALIVED_CHK_EXIT_CONFIG_TEST_SECURITY);
 	default:
-		exit(KEEPALIVED_EXIT_CONFIG_TEST);
+		exit(KEEPALIVED_CHK_EXIT_CONFIG_TEST);
 	}
+}
+
+static unsigned
+check_start_stop_script_secure(notify_script_t **script, magic_t magic)
+{
+	unsigned flags;
+
+	flags = check_script_secure(*script, magic);
+
+	/* Mark not to run if needs inhibiting */
+	if (flags & (SC_INHIBIT | SC_NOTFOUND) ||
+	    !(flags & (SC_EXECUTABLE | SC_SYSTEM)))
+		free_notify_script(script);
+
+	return flags;
 }
 
 #ifndef _ONE_PROCESS_DEBUG_
@@ -767,6 +792,14 @@ static bool reload_config(void)
 		log_message(LOG_INFO, "Cannot change network namespace at a reload - please restart %s", PACKAGE);
 		unsupported_change = true;
 	}
+
+#ifdef _WITH_LVS_
+	if (!!old_global_data->network_namespace_ipvs != !!global_data->network_namespace_ipvs ||
+	    (global_data->network_namespace_ipvs && strcmp(old_global_data->network_namespace_ipvs, global_data->network_namespace_ipvs))) {
+		log_message(LOG_INFO, "Cannot change IPVS network namespace at a reload - please restart %s", PACKAGE);
+		unsupported_change = true;
+	}
+#endif
 
 	if (!!old_global_data->instance_name != !!global_data->instance_name ||
 	    (global_data->instance_name && strcmp(old_global_data->instance_name, global_data->instance_name))) {
@@ -818,6 +851,26 @@ static bool reload_config(void)
 		free_global_data (old_global_data);
 	}
 
+	/* There is no point checking the script security of the
+	 * startup script, since we won't run it after a reload.
+	 */
+	if (global_data->shutdown_script) {
+		magic_t magic;
+		unsigned script_flags;
+
+		magic = ka_magic_open();
+
+		script_flags = check_start_stop_script_secure(&global_data->shutdown_script, magic);
+
+		if (magic)
+			ka_magic_close(magic);
+
+		if (!script_security && script_flags & SC_ISSCRIPT) {
+			report_config_error(CONFIG_SECURITY_ERROR, "SECURITY VIOLATION - start/shutdown scripts are being executed but script_security not enabled.%s",
+						script_flags & SC_INSECURE ? " There are insecure scripts." : "");
+		}
+	}
+
 	if (global_data->reload_time_file)
 		start_reload_monitor();
 
@@ -831,19 +884,20 @@ print_parent_data(__attribute__((unused)) thread_ref_t thread)
 
 	log_message(LOG_INFO, "Printing parent data for process(%d) on signal", getpid());
 
-	fp = fopen_safe(dump_file, "w");
+	fp = open_dump_file("keepalived_parent.data");
 
-	if (!fp) {
-		log_message(LOG_INFO, "Can't open %s (%d: %s)",
-			dump_file, errno, strerror(errno));
+	if (!fp)
 		return;
-	}
 
 	dump_global_data(fp, global_data);
 
 	fclose(fp);
+}
 
-	return;
+void
+reinitialise_global_vars(void)
+{
+	reset_default_script_user();
 }
 
 /* SIGHUP/USR1/USR2/STATS_CLEAR handler */
@@ -886,6 +940,8 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 static void
 do_reload(void)
 {
+	reinitialise_global_vars();
+
 	if (!reload_config())
 		return;
 
@@ -1020,9 +1076,11 @@ start_validate_reload_conf_child(void)
 	FREE_PTR(config_fd_str);
 }
 
-static void
-process_reload_signal(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+void
+start_reload(thread_ref_t thread)
 {
+	if (thread && __test_bit(LOG_DETAIL_BIT, &debug))
+		log_message(LOG_INFO, "Processing queued reload");
 
 	/* if reload_check_config is configured, validate the new config before reload */
 	if (!global_data->reload_check_config) {
@@ -1035,6 +1093,16 @@ process_reload_signal(__attribute__((unused)) void *v, __attribute__((unused)) i
 
 	start_validate_reload_conf_child();
 }
+
+static void
+process_reload_signal(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+{
+	if (!num_reloading)
+		start_reload(NULL);
+	else
+		queue_reload();
+}
+
 #endif
 
 #ifdef THREAD_DUMP
@@ -1124,13 +1192,20 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 
 		/* We are only expecting SIGCHLD */
 		if (siginfo.ssi_signo != SIGCHLD) {
-			log_message(LOG_INFO, "Received signal %u code %d status %d from pid %u while waiting for children to terminate", siginfo.ssi_signo, siginfo.ssi_code, siginfo.ssi_status, siginfo.ssi_pid);
+			log_message(LOG_INFO, "Received signal %u code %d status %d from pid %u"
+					      " while waiting for children to terminate"
+					    , siginfo.ssi_signo, siginfo.ssi_code
+					    , siginfo.ssi_status, siginfo.ssi_pid);
 			continue;
 		}
 
-		if (siginfo.ssi_code != CLD_EXITED && siginfo.ssi_code != CLD_KILLED && siginfo.ssi_code != CLD_DUMPED) {
+		if (siginfo.ssi_code != CLD_EXITED &&
+		    siginfo.ssi_code != CLD_KILLED &&
+		    siginfo.ssi_code != CLD_DUMPED) {
 			/* CLD_STOPPED, CLD_CONTINUED or CLD_TRAPPED */
-			log_message(LOG_INFO, "Received SIGCHLD code %d status %d from pid %u while waiting for children to terminate", siginfo.ssi_code, siginfo.ssi_status, siginfo.ssi_pid);
+			log_message(LOG_INFO, "Received SIGCHLD code %d status %d from pid %u"
+					      " while waiting for children to terminate"
+					    , siginfo.ssi_code, siginfo.ssi_status, siginfo.ssi_pid);
 			continue;
 		}
 
@@ -1141,7 +1216,8 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 					continue;
 				if (ret == -1) {
 					if (!check_EINTR(errno))
-						log_message(LOG_INFO, "Wait for %s child return errno %d", children_term[i].short_name, errno);
+						log_message(LOG_INFO, "Wait for %s child return errno %d"
+								    , children_term[i].short_name, errno);
 					continue;
 				}
 
@@ -1167,7 +1243,8 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	/* A child may not have terminated, so force its termination */
 	for (i = 0; i < NUM_CHILD_TERM; i++) {
 		if (*children_term[i].pid_p) {
-			log_message(LOG_INFO, "%s process failed to die - forcing termination", children_term[i].short_name);
+			log_message(LOG_INFO, "%s process failed to die - forcing termination"
+					    , children_term[i].short_name);
 			kill(*children_term[i].pid_p, SIGKILL);
 		}
 	}
@@ -1178,10 +1255,14 @@ sigend(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
 	} else {
 		/* If we have a shutdown script, run it now */
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
-			log_message(LOG_INFO, "Running shutdown script %s", global_data->shutdown_script->args[0]);
+			log_message(LOG_INFO, "Running shutdown script %s"
+					    , global_data->shutdown_script->args[0]);
 
-		if (system_call_script(master, shutdown_script_completed, NULL, global_data->shutdown_script_timeout * TIMER_HZ, global_data->shutdown_script) == -1)
-			log_message(LOG_INFO, "Call of shutdown script %s failed", global_data->shutdown_script->args[0]);
+		if (system_call_script(master, shutdown_script_completed, NULL
+					     , global_data->shutdown_script_timeout * TIMER_HZ
+					     , global_data->shutdown_script) == -1)
+			log_message(LOG_INFO, "Call of shutdown script %s failed"
+					    , global_data->shutdown_script->args[0]);
 	}
 }
 #endif
@@ -1288,16 +1369,16 @@ core_dump_init(void)
 }
 
 static mode_t
-set_umask(const char *optarg)
+set_umask(const char *opt_arg)
 {
 	long umask_long;
 	mode_t umask_bits;
 	char *endptr;
 
-	umask_long = strtoll(optarg, &endptr, 0);
+	umask_long = strtoll(opt_arg, &endptr, 0);
 
 	if (*endptr || umask_long < 0 || umask_long & ~(S_IRWXU | S_IRWXG | S_IRWXO)) {
-		fprintf(stderr, "Invalid --umask option %s", optarg);
+		fprintf(stderr, "Invalid --umask option %s", opt_arg);
 		return 0;
 	}
 
@@ -1695,7 +1776,11 @@ static void
 usage(const char *prog)
 {
 	fprintf(stderr, "Usage: %s [OPTION...]\n", prog);
-	fprintf(stderr, "  -f, --use-file=FILE          Use the specified configuration file\n");
+	fprintf(stderr, "  -f, --use-file=FILE          Use the specified configuration file\n"
+			"                                default '%s'\n", DEFAULT_CONFIG_FILE);
+#ifdef OLD_DEFAULT_CONFIG_FILE
+	fprintf(stderr, "                                     or '%s'\n", OLD_DEFAULT_CONFIG_FILE);
+#endif
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 	fprintf(stderr, "  -P, --vrrp                   Only run with VRRP subsystem\n");
 	fprintf(stderr, "  -C, --check                  Only run with Health-checker subsystem\n");
@@ -1706,9 +1791,10 @@ usage(const char *prog)
 	fprintf(stderr, "      --all                    Force all child processes to run, even if have no configuration\n");
 	fprintf(stderr, "  -l, --log-console            Log messages to local console\n");
 	fprintf(stderr, "  -D, --log-detail             Detailed log messages\n");
-	fprintf(stderr, "  -S, --log-facility=[0-7]     Set syslog facility to LOG_LOCAL[0-7]\n");
+	fprintf(stderr, "  -S, --log-facility=([0-7]|local[0-7]|user|daemon)\n");
+	fprintf(stderr, "                               Set syslog facility to LOG_LOCAL[0-7], user or daemon (default)\n");
 #ifdef ENABLE_LOG_TO_FILE
-	fprintf(stderr, "  -g, --log-file=FILE          Also log to FILE (default " KA_TMP_DIR "/keepalived.log)\n");
+	fprintf(stderr, "  -g, --log-file=FILE          Also log to FILE (default %s/keepalived.log)\n", tmp_dir);
 	fprintf(stderr, "      --flush-log-file         Flush log file on write\n");
 #endif
 	fprintf(stderr, "  -G, --no-syslog              Don't log via syslog\n");
@@ -1728,6 +1814,7 @@ usage(const char *prog)
 	fprintf(stderr, "  -r, --vrrp_pid=FILE          Use specified pidfile for VRRP child process\n");
 #endif
 #ifdef _WITH_LVS_
+	fprintf(stderr, "  -T, --genhash                Enter into genhash utility mode (this should be the first option used).\n");
 	fprintf(stderr, "  -c, --checkers_pid=FILE      Use specified pidfile for checkers child process\n");
 	fprintf(stderr, "  -a, --address-monitoring     Report all address additions/deletions notified via netlink\n");
 #endif
@@ -1850,6 +1937,9 @@ parse_cmdline(int argc, char **argv)
 	unsigned facility;
 	mode_t new_umask_val;
 	unsigned i;
+#ifdef _WITH_LVS_
+	bool first_option;
+#endif
 
 	struct option long_options[] = {
 		{"use-file",		required_argument,	NULL, 'f'},
@@ -1886,6 +1976,7 @@ parse_cmdline(int argc, char **argv)
 		{"vrrp_pid",		required_argument,	NULL, 'r'},
 #endif
 #ifdef _WITH_LVS_
+		{"genhash",		no_argument,		NULL, 'T'},
 		{"checkers_pid",	required_argument,	NULL, 'c'},
 		{"address-monitoring",	no_argument,		NULL, 'a'},
 #endif
@@ -1925,6 +2016,10 @@ parse_cmdline(int argc, char **argv)
 	 * of longindex, so we need to ensure that before calling getopt_long(), longindex
 	 * is set to a known invalid value */
 	curind = optind;
+#ifdef _WITH_LVS_
+	first_option = true;
+#endif
+
 	/* Used short options: ABCDGILMPRSVXabcdefghilmnprstuvx */
 	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndu:DRS:f:p:i:es:mM::g::Gt::"
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
@@ -1934,7 +2029,7 @@ parse_cmdline(int argc, char **argv)
 					    "r:VX"
 #endif
 #ifdef _WITH_LVS_
-					    "ac:I"
+					    "ac:IT"
 #endif
 #ifdef _WITH_BFD_
 					    "Bb:"
@@ -1995,6 +2090,15 @@ parse_cmdline(int argc, char **argv)
 		case 'I':
 			__set_bit(DONT_RELEASE_IPVS_BIT, &debug);
 			break;
+		case 'T':
+			if (!first_option)
+				fprintf(stderr, "Warning -- `%s` not used as first option, previous options ignored\n", longindex == -1 ? "-T" : long_options[longindex].name);
+
+			/* Set our process name */
+			prctl(PR_SET_NAME, "genhash");
+
+			check_genhash(false, argc, argv);
+			exit(0);
 #endif
 		case 'D':
 			if (__test_bit(LOG_DETAIL_BIT, &debug))
@@ -2034,7 +2138,7 @@ parse_cmdline(int argc, char **argv)
 			if (optarg && optarg[0])
 				log_file_name = optarg;
 			else
-				log_file_name = KA_TMP_DIR "/keepalived.log";
+				log_file_name = "keepalived.log";
 			open_log_file(log_file_name, NULL, NULL, NULL);
 #else
 			fprintf(stderr, "-g requires configure option --enable-log-file\n");
@@ -2212,6 +2316,9 @@ parse_cmdline(int argc, char **argv)
 			break;
 		}
 		curind = optind;
+#ifdef _WITH_LVS_
+		first_option = false;
+#endif
 	}
 
 	if (optind < argc) {
@@ -2238,6 +2345,9 @@ register_parent_thread_addresses(void)
 {
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
+#ifndef _ONE_PROCESS_DEBUG_
+	register_config_notify_addresses();
+#endif
 
 #ifdef _WITH_LVS_
 	register_check_parent_addresses();
@@ -2266,21 +2376,6 @@ register_parent_thread_addresses(void)
 }
 #endif
 
-static unsigned
-check_start_stop_script_secure(notify_script_t **script, magic_t magic)
-{
-	unsigned flags;
-
-	flags = check_notify_script_secure(script, magic);
-
-	/* Mark not to run if needs inhibiting */
-	if (flags & (SC_INHIBIT | SC_NOTFOUND) ||
-	    !(flags & (SC_EXECUTABLE | SC_SYSTEM)))
-		free_notify_script(script);
-
-	return flags;
-}
-
 /* Entry point */
 int
 keepalived_main(int argc, char **argv)
@@ -2293,6 +2388,17 @@ keepalived_main(int argc, char **argv)
 	unsigned script_flags;
 	struct rusage usage;
 	struct rusage child_usage;
+#ifdef OLD_DEFAULT_CONFIG_FILE
+	struct stat statbuf;
+#endif
+
+#ifdef _WITH_LVS_
+	char *name = strrchr(argv[0], '/');
+	if (!strcmp(name ? name + 1 : argv[0], "genhash")) {
+		check_genhash(true, argc, argv);
+		/* Not reached */
+	}
+#endif
 
 #ifdef _MEM_CHECK_
 	__set_bit(MEM_CHECK_BIT, &debug);
@@ -2304,6 +2410,11 @@ keepalived_main(int argc, char **argv)
 	/* Ensure time_now is set. We then don't have to check anywhere
 	 * else if it is set. */
 	set_time_now();
+
+	/* Is there a TMPDIR override? */
+	set_tmp_dir();
+
+	set_our_uid_gid();
 
 	/* Save command line options in case need to log them later */
 	save_cmd_line_options(argc, argv);
@@ -2410,6 +2521,24 @@ keepalived_main(int argc, char **argv)
 
 	log_command_line(0);
 
+	/* If no configuration file has been specified, select the
+	 * first default config file that exists. */
+	if (!conf_file) {
+		conf_file = DEFAULT_CONFIG_FILE;
+
+#ifdef OLD_DEFAULT_CONFIG_FILE
+		/* If DEFAULT_CONFIG_FILE doesn't exist and
+		 * OLD_DEFAULT_CONFIG_FILE does exist, use the
+		 * latter */
+		if (stat(DEFAULT_CONFIG_FILE, &statbuf) &&
+		    !stat(OLD_DEFAULT_CONFIG_FILE, &statbuf)) {
+			conf_file = OLD_DEFAULT_CONFIG_FILE;
+			log_message(LOG_INFO, "WARNING - using deprecated default config file '%s' - please move to '%s'",
+					OLD_DEFAULT_CONFIG_FILE, DEFAULT_CONFIG_FILE);
+		}
+#endif
+	}
+
 	/* Check we can read the configuration file(s).
 	   NOTE: the working directory will be / if we
 	   forked, but will be the current working directory
@@ -2455,9 +2584,7 @@ keepalived_main(int argc, char **argv)
 	}
 
 	if (!__test_bit(CONFIG_TEST_BIT, &debug) &&
-	    (global_data->instance_name
-	     || global_data->network_namespace
-					      )) {
+	    (global_data->instance_name || global_data->network_namespace)) {
 		if ((syslog_ident = make_syslog_ident(PACKAGE_NAME))) {
 			log_message(LOG_INFO, "Changing syslog ident to %s", syslog_ident);
 			closelog();
@@ -2484,16 +2611,16 @@ keepalived_main(int argc, char **argv)
 			/* Create the directory for pid files */
 			create_pid_dir();
 		}
-
-		/* If we want to monitor processes, we have to do it before calling
-		 * setns() */
-#ifdef _WITH_TRACK_PROCESS_
-		open_track_processes();
-#endif
 	}
 
 	if (global_data->network_namespace) {
-		if (global_data->network_namespace && !set_namespaces(global_data->network_namespace)) {
+		/* If we want to monitor processes, we have to do it before calling
+		 * setns(), so start it here if we are using network namespaces. */
+#ifdef _WITH_TRACK_PROCESS_
+		if (!__test_bit(CONFIG_TEST_BIT, &debug))
+			open_track_processes();
+#endif
+		if (!set_namespaces(global_data->network_namespace)) {
 			log_message(LOG_ERR, "Unable to set network namespace %s - exiting", global_data->network_namespace);
 			goto end;
 		}
@@ -2536,18 +2663,18 @@ keepalived_main(int argc, char **argv)
 		else
 		{
 			if (!main_pidfile)
-				main_pidfile = RUN_DIR KEEPALIVED_PID_FILE PID_EXTENSION;
+				main_pidfile = RUNSTATEDIR "/" KEEPALIVED_PID_FILE PID_EXTENSION;
 #ifdef _WITH_LVS_
 			if (!checkers_pidfile)
-				checkers_pidfile = RUN_DIR CHECKERS_PID_FILE PID_EXTENSION;
+				checkers_pidfile = RUNSTATEDIR "/" CHECKERS_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_VRRP_
 			if (!vrrp_pidfile)
-				vrrp_pidfile = RUN_DIR VRRP_PID_FILE PID_EXTENSION;
+				vrrp_pidfile = RUNSTATEDIR "/" VRRP_PID_FILE PID_EXTENSION;
 #endif
 #ifdef _WITH_BFD_
 			if (!bfd_pidfile)
-				bfd_pidfile = RUN_DIR BFD_PID_FILE PID_EXTENSION;
+				bfd_pidfile = RUNSTATEDIR "/" BFD_PID_FILE PID_EXTENSION;
 #endif
 		}
 
@@ -2565,8 +2692,7 @@ keepalived_main(int argc, char **argv)
 	}
 
 	/* daemonize process */
-	if (!__test_bit(DONT_FORK_BIT, &debug) &&
-	    xdaemon() > 0) {
+	if (!__test_bit(DONT_FORK_BIT, &debug) && xdaemon() > 0) {
 		closelog();
 		FREE_CONST_PTR(config_id);
 		FREE_PTR(orig_core_dump_pattern);
@@ -2597,7 +2723,6 @@ keepalived_main(int argc, char **argv)
 
 	if (__test_bit(CONFIG_TEST_BIT, &debug)) {
 		validate_config();
-
 		config_test_exit();
 	}
 
@@ -2635,7 +2760,7 @@ keepalived_main(int argc, char **argv)
 #endif
 
 	/* Launch the scheduling I/O multiplexer */
-	launch_thread_scheduler(master);
+	exit_code = launch_thread_scheduler(master);
 
 	/* Finish daemon process */
 	stop_keepalived();

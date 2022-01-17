@@ -97,8 +97,8 @@ POST_UNINSTALL = :
 sbin_PROGRAMS = keepalived$(EXEEXT)
 subdir = keepalived
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/pkg.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/as-ac-expand.m4 \
+	$(top_srcdir)/m4/pkg.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(noinst_HEADERS) \
@@ -188,7 +188,7 @@ am__uninstall_files_from_dir = { \
     || { echo " ( cd '$$dir' && rm -f" $$files ")"; \
          $(am__cd) "$$dir" && rm -f $$files; }; \
   }
-DATA = $(init_DATA) $(systemdsystemunit_DATA)
+DATA = $(init_DATA) $(noinst_DATA) $(systemdsystemunit_DATA)
 HEADERS = $(noinst_HEADERS)
 RECURSIVE_CLEAN_TARGETS = mostlyclean-recursive clean-recursive	\
   distclean-recursive maintainer-clean-recursive
@@ -261,6 +261,7 @@ CFLAGS = @CFLAGS@
 CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
+DBUS_DATADIR = @DBUS_DATADIR@
 DEFAULT_CONFIG_DIR = @DEFAULT_CONFIG_DIR@
 DEFAULT_CONFIG_FILE = @DEFAULT_CONFIG_FILE@
 DEFAULT_CONFIG_FILENAME = @DEFAULT_CONFIG_FILENAME@
@@ -271,7 +272,7 @@ ECHO_N = @ECHO_N@
 ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
-GENHASH_LIBS = @GENHASH_LIBS@
+EXPANDED_DATADIR = @EXPANDED_DATADIR@
 GREP = @GREP@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
@@ -298,6 +299,7 @@ MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 NETSNMP_CONFIG = @NETSNMP_CONFIG@
 OBJEXT = @OBJEXT@
+OLD_DEFAULT_CONFIG_FILE = @OLD_DEFAULT_CONFIG_FILE@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -310,7 +312,8 @@ PKG_CONFIG = @PKG_CONFIG@
 PKG_CONFIG_LIBDIR = @PKG_CONFIG_LIBDIR@
 PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 RANLIB = @RANLIB@
-RUN_DIR_ROOT = @RUN_DIR_ROOT@
+RUNSTATEDIR = @RUNSTATEDIR@
+SAMPLES_DIR = @SAMPLES_DIR@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
@@ -319,6 +322,7 @@ SPHINXBUILDNAME = @SPHINXBUILDNAME@
 STRIP = @STRIP@
 SYSTEMD_EXEC_START_OPTIONS = @SYSTEMD_EXEC_START_OPTIONS@
 SYSTEMD_SERVICE_TYPE = @SYSTEMD_SERVICE_TYPE@
+USE_LLD = @USE_LLD@
 VERSION = @VERSION@
 abs_builddir = @abs_builddir@
 abs_srcdir = @abs_srcdir@
@@ -371,7 +375,7 @@ AM_CFLAGS = $(KA_CFLAGS) $(DEBUG_CFLAGS)
 AM_LDFLAGS = $(KA_LDFLAGS) $(DEBUG_LDFLAGS)
 # AM_LIBTOOLFLAGS	= $(KA_LIBTOOLFLAGS)
 edit = echo "  EDIT     $@"; \
-	sed \
+	@SED@ \
 	 -e 's|@sbindir[@]|$(sbindir)|g' \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
@@ -392,10 +396,11 @@ TRACKER_LIB = trackers/libtracker.a
 @WITH_BFD_TRUE@BFD_SUBDIR = bfd
 @WITH_BFD_TRUE@BFD_LIB = bfd/libbfd.a
 SUBDIRS = core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) $(TRACKER_SUBDIR) etc
-EXTRA_DIST = keepalived.service.in
+EXTRA_DIST = keepalived.service.in keepalived-non-root.service.in
 keepalived_LDADD = core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcore.a $(TRACKER_LIB) ../lib/liblib.a $(KA_LIBS)
-MOSTLYCLEANFILES = keepalived.service
+@INIT_SYSTEMD_TRUE@MOSTLYCLEANFILES = keepalived.service keeplived-non-root.service
 @INIT_SYSTEMD_TRUE@systemdsystemunit_DATA = keepalived.service
+@INIT_SYSTEMD_TRUE@noinst_DATA = keepalived-non-root.service
 @INIT_OPENRC_TRUE@initdir = $(sysconfdir)/init.d
 @INIT_OPENRC_TRUE@init_DATA = etc/openrc/keepalived
 all: all-recursive
@@ -745,6 +750,7 @@ maintainer-clean-generic:
 	@echo "This command is intended for maintainers to use"
 	@echo "it deletes files that may require special tools to rebuild."
 	-test -z "$(MAINTAINERCLEANFILES)" || rm -f $(MAINTAINERCLEANFILES)
+@WITH_IPVS_FALSE@install-exec-hook:
 clean: clean-recursive
 
 clean-am: clean-generic clean-sbinPROGRAMS mostlyclean-am
@@ -774,7 +780,8 @@ install-dvi: install-dvi-recursive
 install-dvi-am:
 
 install-exec-am: install-sbinPROGRAMS
-
+	@$(NORMAL_INSTALL)
+	$(MAKE) $(AM_MAKEFLAGS) install-exec-hook
 install-html: install-html-recursive
 
 install-html-am:
@@ -815,7 +822,8 @@ ps-am:
 uninstall-am: uninstall-initDATA uninstall-sbinPROGRAMS \
 	uninstall-systemdsystemunitDATA
 
-.MAKE: $(am__recursive_targets) install-am install-strip
+.MAKE: $(am__recursive_targets) install-am install-exec-am \
+	install-strip
 
 .PHONY: $(am__recursive_targets) CTAGS GTAGS TAGS all all-am \
 	am--depfiles check check-am clean clean-generic \
@@ -823,10 +831,10 @@ uninstall-am: uninstall-initDATA uninstall-sbinPROGRAMS \
 	distclean-compile distclean-generic distclean-tags distdir dvi \
 	dvi-am html html-am info info-am install install-am \
 	install-data install-data-am install-dvi install-dvi-am \
-	install-exec install-exec-am install-html install-html-am \
-	install-info install-info-am install-initDATA install-man \
-	install-pdf install-pdf-am install-ps install-ps-am \
-	install-sbinPROGRAMS install-strip \
+	install-exec install-exec-am install-exec-hook install-html \
+	install-html-am install-info install-info-am install-initDATA \
+	install-man install-pdf install-pdf-am install-ps \
+	install-ps-am install-sbinPROGRAMS install-strip \
 	install-systemdsystemunitDATA installcheck installcheck-am \
 	installdirs installdirs-am maintainer-clean \
 	maintainer-clean-generic mostlyclean mostlyclean-compile \
@@ -837,11 +845,49 @@ uninstall-am: uninstall-initDATA uninstall-sbinPROGRAMS \
 .PRECIOUS: Makefile
 
 
-@INIT_SYSTEMD_TRUE@keepalived.service: $(srcdir)/Makefile.am
+@INIT_SYSTEMD_TRUE@keepalived.service keepalived-non-root.service: $(srcdir)/Makefile.am
 @INIT_SYSTEMD_TRUE@	@rm -f $@ $@.tmp
 @INIT_SYSTEMD_TRUE@	@$(edit) '$(srcdir)/$@.in' >$@
 
 @INIT_SYSTEMD_TRUE@keepalived.service: $(srcdir)/keepalived.service.in
+
+@INIT_SYSTEMD_TRUE@keepalived-non-root.service: $(srcdir)/keepalived-non-root.service.in
+
+# checks for realpath, and also not busybox version which does not support --relative-to
+@WITH_IPVS_TRUE@install-exec-hook:
+@WITH_IPVS_TRUE@	$(MKDIR_P) $(DESTDIR)/$(bindir)
+@WITH_IPVS_TRUE@	@( \
+@WITH_IPVS_TRUE@	rm -f $(DESTDIR)/$(bindir)/genhash; \
+@WITH_IPVS_TRUE@	realpath --relative-to=/ / >/dev/null 2>&1; \
+@WITH_IPVS_TRUE@	if [ $$? -eq 0 ]; then \
+@WITH_IPVS_TRUE@		$(LN_S) `realpath --relative-to="$(DESTDIR)/$(bindir)" "$(DESTDIR)/$(sbindir)/keepalived"` $(DESTDIR)/$(bindir)/genhash; \
+@WITH_IPVS_TRUE@	else \
+@WITH_IPVS_TRUE@		if [ $(bindir) = $(sbindir) ]; then \
+@WITH_IPVS_TRUE@			d= ; \
+@WITH_IPVS_TRUE@			s= ; \
+@WITH_IPVS_TRUE@		else \
+@WITH_IPVS_TRUE@			d=`echo $(bindir) | @SED@ -e "s:^/::"`; \
+@WITH_IPVS_TRUE@			s=`echo $(sbindir) | @SED@ -e "s:^/::"`; \
+@WITH_IPVS_TRUE@			\
+@WITH_IPVS_TRUE@			while [ 1 ]; do \
+@WITH_IPVS_TRUE@				d1=`echo $$d | @SED@ -e "s:/.*::"`; \
+@WITH_IPVS_TRUE@				s1=`echo $$s | @SED@ -e "s:/.*::"`; \
+@WITH_IPVS_TRUE@				if [ $$d1 != $$s1 ]; then \
+@WITH_IPVS_TRUE@					break; \
+@WITH_IPVS_TRUE@				fi; \
+@WITH_IPVS_TRUE@				d=`echo $$d | @SED@ -e "s:^[^/]*/::"`; \
+@WITH_IPVS_TRUE@				s=`echo $$s | @SED@ -e "s:^[^/]*/::"`; \
+@WITH_IPVS_TRUE@				if [ -z $$d ]; then break; fi; \
+@WITH_IPVS_TRUE@				if [ -z $$s ]; then break; fi; \
+@WITH_IPVS_TRUE@			done; \
+@WITH_IPVS_TRUE@			\
+@WITH_IPVS_TRUE@			d=`echo /$$d/ | @SED@ -e "s:/[^/.]*/:/../:g" -e "s:/[^/.]*/:/../:g" -e "s:^/::"`; \
+@WITH_IPVS_TRUE@			s=$$s/ ; \
+@WITH_IPVS_TRUE@		fi; \
+@WITH_IPVS_TRUE@		\
+@WITH_IPVS_TRUE@		$(LN_S) $$d$${s}keepalived $(DESTDIR)/$(bindir)/genhash; \
+@WITH_IPVS_TRUE@	fi; \
+@WITH_IPVS_TRUE@	)
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.
