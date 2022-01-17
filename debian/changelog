@@ -1,3 +1,9 @@
+keepalived (1:2.2.7-1) UNRELEASED; urgency=medium
+
+  * [639d263] New upstream version 2.2.7
+
+ -- Tobias Urdin <tobias.urdin@binero.com>  Mon, 17 Jan 2022 13:45:39 +0000
+
 keepalived (1:2.2.1-1) UNRELEASED; urgency=medium
 
   * [61cbc18] New upstream version 2.2.1
